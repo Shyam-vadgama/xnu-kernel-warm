@@ -6,6 +6,7 @@
 !/.gitignore
 !/.gitattributes
 !/VERSION
+!/AGENTS.md
 !/README.md
 !/CONTRIBUTING.md
 !/CHANGELOG.md
@@ -122,7 +123,7 @@ __pycache__/
 !/devices/README.md
 !/devices/qemu/
 !/devices/peridot/
-/devices/peridot/prebuilt/SILICIUM_UEFI.fd
+!/devices/peridot/prebuilt/SILICIUM_UEFI.fd
 
 # Android platform-tools for xl on a Mac (tools/macos-bin/README.md): not part of the repository
 /tools/macos-bin/platform-tools
