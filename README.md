@@ -17,6 +17,23 @@ and **120 frames a second has not been reached**. [Metal on the Adreno](docs/ref
 Start with [Getting started](docs/getting-started/index.md), [On the phone](docs/getting-started/phone.md) or
 [Port a device](docs/porting/index.md). What works, part by part: [the documentation's front page](docs/index.md#what-works).
 
+## POCO F6 / Redmi Turbo 3 (`peridot`) Port
+
+This fork (`peridot-2.3.4` branch) adds full bring-up support for **Xiaomi POCO F6 / Redmi Turbo 3 (`peridot`, Qualcomm Snapdragon 8s Gen 3 / SM8635)**:
+
+- **Hardware brought up:** UEFI GOP display (`1220x2712 @ 120 Hz`), Goodix GT9916R SPI touchscreen, Adreno 735 GPU (`hakios-metal`), UFS storage, AW8697 haptics, physical buttons, thermal zones, and ongoing Wi-Fi (WCN6750 WPSS) / ADSP audio / Bluetooth bring-up.
+- **Zero-flash RAM boot:** Boots temporarily via `fastboot boot` without modifying Android partitions; rebooting returns directly to HyperOS.
+- **Prebuilt UEFI assets included:** [`devices/peridot/prebuilt/`](devices/peridot/prebuilt/) includes `SILICIUM_UEFI.fd`, `BootShim.bin`, `peridot.dtb`, and `mkbootimg.py` so you do not need to compile Mu-Silicium UEFI from scratch.
+- **Quick build (Linux / WSL2):**
+  ```sh
+  git checkout peridot-2.3.4
+  make peridot_defconfig
+  make unpack IPSW=/path/to/iPhone10,3_16.5_20F66_Restore.ipsw
+  DEVICE=peridot make firmware
+  make kernel JOBS=$(nproc) && make loader && make images
+  ```
+- **Device docs & AI Agent guide:** See [`devices/peridot/README.md`](devices/peridot/README.md) and [`AGENTS.md`](AGENTS.md) (detailed hardware map, safety rules, and troubleshooting for AI coding agents).
+
 ## Repositories
 
 | Repository | Contents |
