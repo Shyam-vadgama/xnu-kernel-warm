@@ -1883,8 +1883,16 @@ step_header(void)
 	}
 
 	announce("hand the image's header to TrustZone to check its signature (image 6), in a page of ours");
-	/* in memory of ours, page-aligned and in one piece, not touched again and never freed (see hakios.adreno.c) */
-	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	/*
+	 * TrustZone's PAS_INIT_IMAGE (0x42000201) rejects metadata pages allocated at or
+	 * above 0x970000000 on Peridot with (2/3, 0x1), so constrain the header page below
+	 * that boundary first and fall back to unconstrained kmem_alloc if none are free.
+	 */
+	if (kmem_alloc_contig(kernel_map, &page, PAGE_SIZE, PAGE_MASK,
+	    (ppnum_t)(0x970000000ULL >> PAGE_SHIFT), 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS &&
+	    kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("wifi: %u: no memory\n", step);
 		return false;
 	}
@@ -1895,8 +1903,15 @@ step_header(void)
 	settle();
 	result = scm("to take the Wi-Fi DSP's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_WPSS, kvtophys(page), 0, &answer);
 	if (result != 0 || answer != 0) {
-		printf("wifi: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx\n", step, result, answer);
-		return false;
+		printf("wifi: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx (phys %#llx), trying shutdown & retry\n",
+		    step, result, answer, (uint64_t)kvtophys(page));
+		scm("to shut the Wi-Fi DSP down before retry", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_WPSS, 0, 0, &answer);
+		sleep_ms(10);
+		result = scm("to take the Wi-Fi DSP's header (retry)", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_WPSS, kvtophys(page), 0, &answer);
+		if (result != 0 || answer != 0) {
+			printf("wifi: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the retry returns %d, its answer is %#llx\n", step, result, answer);
+			return false;
+		}
 	}
 	printf("wifi: %u: TRUSTZONE ACCEPTS THE WI-FI DSP'S SIGNATURE FROM THIS KERNEL\n", step);
 
