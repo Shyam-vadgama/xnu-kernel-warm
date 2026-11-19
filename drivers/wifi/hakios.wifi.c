@@ -1282,7 +1282,17 @@ step_pins(void)
 
 /* ---- step 6: the firmware ------------------------------------------------------------------------------ */
 
-#define PAS_WPSS                6               /* dt: qcom,pas-id of qcom,wpss@8a00000 */
+static inline uint32_t
+hakios_pas_wpss(void)
+{
+	uint32_t pas = 0;
+	if (PE_parse_boot_argn("soc_pas_wpss", &pas, sizeof(pas)) && pas != 0) {
+		return pas;
+	}
+	return hakios_board_number("pas_wpss", 6);
+}
+
+#define PAS_WPSS                hakios_pas_wpss()
 #define WPSS_MEMORY             hakios_board_addr("wpss_mem", 0x9ae00000u)
 #define WPSS_MEMORY_SIZE        hakios_board_number("wpss_size", 0x01900000u)
 
@@ -1739,6 +1749,8 @@ dsp_ask_to_stop(uint32_t bound_ms)
 #define SCM_THREE_VALUES        3
 #define SCM_VALUE_AND_BUFFER    (2 | 2 << 6)            /* two: a number, and the address of memory it may read and write */
 #define SCM_INTERRUPTED         1                       /* a call that was preempted says so, and is made again so */
+#define SCM_WAITQ_SLEEP         2                       /* TrustZone wait queue sleep */
+#define SCM_WAITQ_RESUME        (SCM_64 | SCM_SIP | (0x24 << 8 | 0x02))
 
 static LCK_MTX_DECLARE(dsp_lock, &wifi_lock_group);     /* the DSP being started or stopped */
 static bool dsp_started;                /* TrustZone has let it out of reset, and has not shut it down since */
@@ -1750,18 +1762,22 @@ static int32_t
 scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uint64_t second, uint64_t third, uint64_t *answer)
 {
 	uint64_t session = 0;
+	uint64_t cur_fn = function | SCM_64 | SCM_SIP;
+	uint64_t cur_args = arguments;
+	uint64_t cur_first = first;
+	uint64_t cur_second = second;
+	uint64_t cur_third = third;
 
-	function |= SCM_64 | SCM_SIP;
-	printf("wifi: %u: about to ask TrustZone %s: smc %#llx, arguments %#llx, %#llx, %#llx\n", step, what, function, first,
-	    second, third);
-	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, function, first, second);
+	printf("wifi: %u: about to ask TrustZone %s: smc %#llx, arguments %#llx, %#llx, %#llx\n", step, what, cur_fn, cur_first,
+	    cur_second, cur_third);
+	snprintf(last_write, sizeof(last_write), "step %u asked TrustZone %#llx(%#llx, %#llx)", step, cur_fn, cur_first, cur_second);
 	hold(true);
 	for (int i = 0; i < 100; i++) {
-		register uint64_t x0 __asm__("x0") = i == 0 ? function : SCM_INTERRUPTED;
-		register uint64_t x1 __asm__("x1") = arguments;
-		register uint64_t x2 __asm__("x2") = first;
-		register uint64_t x3 __asm__("x3") = second;
-		register uint64_t x4 __asm__("x4") = third;
+		register uint64_t x0 __asm__("x0") = cur_fn;
+		register uint64_t x1 __asm__("x1") = cur_args;
+		register uint64_t x2 __asm__("x2") = cur_first;
+		register uint64_t x3 __asm__("x3") = cur_second;
+		register uint64_t x4 __asm__("x4") = cur_third;
 		register uint64_t x5 __asm__("x5") = 0;
 		register uint64_t x6 __asm__("x6") = session;
 		register uint64_t x7 __asm__("x7") = 0;
@@ -1769,11 +1785,25 @@ scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uin
 		__asm__ volatile ("smc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4), "+r" (x5), "+r" (x6),
 		    "+r" (x7) : : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
 		session = x6;
-		if (x0 != SCM_INTERRUPTED) {
-			printf("wifi: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
-			*answer = x1;
-			return (int32_t)x0;
+		if (x0 == SCM_INTERRUPTED) {
+			cur_fn = SCM_INTERRUPTED;
+			continue;
 		}
+		if (x0 == SCM_WAITQ_SLEEP) {
+			uint64_t smc_call_ctx = x2;
+			printf("wifi: %u: TrustZone asks waitq sleep (wq_ctx %#llx, ctx %#llx), resuming with waitq_resume...\n",
+			    step, x1, smc_call_ctx);
+			sleep_ms(2);
+			cur_fn = SCM_WAITQ_RESUME;
+			cur_args = 1;
+			cur_first = smc_call_ctx;
+			cur_second = 0;
+			cur_third = 0;
+			continue;
+		}
+		printf("wifi: %u: TrustZone returns %d, answer %#llx\n", step, (int32_t)x0, x1);
+		*answer = x1;
+		return (int32_t)x0;
 	}
 	printf("wifi: %u: TrustZone keeps saying the call was interrupted\n", step);
 	return -1;
@@ -4092,28 +4122,51 @@ hakios_wifi_radio_address(uint8_t *address)
 	bool good;
 
 	if (!PE_parse_boot_arg_str("wifi_mac", text, sizeof(text)) || text[0] == 0) {
+		uint64_t fsz = 0;
+		const uint8_t *mf = image_file("wlan_mac.bin", &fsz);
+		if (mf == NULL) {
+			mf = image_file("mac", &fsz);
+		}
+		if (mf != NULL && fsz > 0) {
+			const char *p = (const char *)mf;
+			for (uint64_t i = 0; i + 6 <= fsz; i++) {
+				if (memcmp(p + i, "wlan0=", 6) == 0) {
+					p += i + 6;
+					break;
+				}
+			}
+			unsigned ti = 0;
+			while (*p && *p != '\r' && *p != '\n' && *p != ' ' && ti < sizeof(text) - 1) {
+				text[ti++] = *p++;
+			}
+			text[ti] = '\0';
+		}
+	}
+	if (text[0] == 0) {
 		printf("wifi: %u: the driver asks for the radio's address: none was given (wifi_mac)\n", step);
 		return false;
 	}
 	good = true;
-	for (const char *c = text;; c++) {
+	for (const char *c = text; *c != 0 && good; c++) {
+		if (*c == ':' || *c == '-' || *c == ' ' || *c == '\r' || *c == '\n') {
+			continue;
+		}
 		int digit = *c >= '0' && *c <= '9' ? *c - '0' : *c >= 'a' && *c <= 'f' ? *c - 'a' + 10 : *c >= 'A' && *c <= 'F' ?
 		    *c - 'A' + 10 : -1;
 
-		if (digit >= 0 && digits < 2) {
-			value = value << 4 | (unsigned)digit;
-			digits++;
-		} else if ((*c == ':' || *c == 0) && digits != 0 && count < 6) {
-			bytes[count++] = (uint8_t)value;
-			digits = value = 0;
-		} else {
+		if (digit < 0) {
 			good = false;
-		}
-		if (*c == 0 || !good) {
 			break;
 		}
+		value = value << 4 | (unsigned)digit;
+		if (++digits == 2) {
+			if (count < 6) {
+				bytes[count++] = (uint8_t)value;
+			}
+			digits = value = 0;
+		}
 	}
-	good = good && count == 6 && !(bytes[0] & 1) && (bytes[0] | bytes[1] | bytes[2] | bytes[3] | bytes[4] | bytes[5]) != 0;
+	good = good && count == 6 && digits == 0 && !(bytes[0] & 1) && (bytes[0] | bytes[1] | bytes[2] | bytes[3] | bytes[4] | bytes[5]) != 0;
 	printf("wifi: %u: the driver asks for the radio's address: one was given, %lu characters, %s\n", step,
 	    (unsigned long)strlen(text), good ? "six bytes: it is the radio's for this run" : "WHICH IS NOT A STATION'S ADDRESS: "
 	    "not used");

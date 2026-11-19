@@ -743,6 +743,7 @@ lx_start(void)
 	 * above is what goes over a cable.
 	 */
 	ath11k_frame_mode = ATH11K_HW_TXRX_ETHERNET;
+	ath11k_cold_boot_cal = lx_os_option("wifi_cal") > 0;
 	device.of_node = &node;
 	device.kobj.name = "wifi";
 
