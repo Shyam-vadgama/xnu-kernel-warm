@@ -478,7 +478,7 @@ set_scan(const struct apple80211req *request, char *said, size_t said_size)
 		what->ssid_length = (uint8_t)asked->ssid_length;
 		memcpy(what->ssid, asked->ssid, asked->ssid_length);
 	}
-	what->passive = (asked->scan_type == 2) || (asked->ssid_length == 0);
+	what->passive = asked->scan_type == 2;
 	what->dwell_ms = asked->dwell_ms;
 	/* (more channels than there is room to name: every channel) */
 	for (unsigned i = 0; i < asked->channel_count && i < 400 && asked->channel_count <= 64; i++) {

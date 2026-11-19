@@ -346,7 +346,7 @@ hakios_wifi_option(const char *name)
 	static const struct {
 		const char *name;
 		uint32_t value;
-	} stands_for[] = { { "wifi_lx", 2 }, { "wifi_smmu", 2 }, { "wifi_station", 1 }, { "wifi_keep", 1 }, { "wifi_irq", 0 },
+	} stands_for[] = { { "wifi_lx", 2 }, { "wifi_smmu", 2 }, { "wifi_station", 1 }, { "wifi_keep", 1 }, { "wifi_irq", 1 },
 			   { "wifi_ba", 1 }, { "wifi_wide", 1 } };
 	uint32_t value = 0;
 
