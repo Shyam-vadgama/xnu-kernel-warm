@@ -512,13 +512,17 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	rm -f root/fw/network
 	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
+	for f in wlan_mac.bin mac; do
+		if [ -f "../fw-wifi/$f" ]; then install -m 0644 "../fw-wifi/$f" root/fw/$f; fi
+	done
 fi
 # ... and the Bluetooth patch and NVM, from the phone's /vendor/bt_firmware/image into ../fw-bt
 # (drivers/bluetooth/hakios.bt.c reads them from fw/ before the root is mounted; bt=1)
 if [ -d ../fw-bt ]; then
 	mkdir -p root/fw
 	for f in msbtfw12.mbn msbtfw12.tlv msnv12.bin; do
-		[ -f "../fw-bt/$f" ] && install -m 0644 "../fw-bt/$f" root/fw/
+		if [ -f "../fw-bt/$f" ]; then install -m 0644 "../fw-bt/$f" root/fw/
+		elif [ -f "../fw-bt/image/$f" ]; then install -m 0644 "../fw-bt/image/$f" root/fw/; fi
 	done
 fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic

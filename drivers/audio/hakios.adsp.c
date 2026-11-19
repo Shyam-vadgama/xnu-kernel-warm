@@ -1460,6 +1460,32 @@ dtb_file(const char *name, uint64_t *size, bool *from_root)
 	return data;
 }
 
+static bool
+alloc_tz_header_page(vm_offset_t *page_out, const uint8_t *header, uint64_t header_size)
+{
+	vm_offset_t page = 0;
+
+	/*
+	 * TrustZone's PAS_INIT_IMAGE (0x42000201) rejects metadata pages allocated at or
+	 * above 0x970000000 on Peridot with (2, 0x1), so constrain the header page below
+	 * that boundary first and fall back to unconstrained kmem_alloc if none are free.
+	 */
+	if (kmem_alloc_contig(kernel_map, &page, PAGE_SIZE, PAGE_MASK,
+	    (ppnum_t)(0x970000000ULL >> PAGE_SHIFT), 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS &&
+	    kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		return false;
+	}
+	memcpy((void *)page, header, header_size);
+	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	settle();
+	*page_out = page;
+	return true;
+}
+
 /*
  * Load and start adsp_dtb.mdt through PAS 0x24.  Linux does this in adsp_load(), before the
  * DSP's own image is authenticated; its absence is not fatal here, so an older root image can
@@ -1563,32 +1589,27 @@ dtb_load(void)
 	printf("adsp: %u: the DTB is whole: a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
 	    "bytes from %#x\n", step, size, hashes, dtb_image.segments, files, dtb_image.size, lowest);
 
-	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-		printf("adsp: %u: no memory for the DTB's header\n", step);
+	if (!alloc_tz_header_page(&page, header, dtb_image.header_size)) {
+		tell("adsp: %u: no memory for the DTB's header\n", step);
 		goto fail;
 	}
-	memcpy((void *)page, header, dtb_image.header_size);
-	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
-	}
-	settle();
 	result = scm("to take the audio DSP's DTB header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_ADSP_DTB,
 	    kvtophys(page), 0, &answer);
 	if (result != 0 || answer != 0) {
-		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB HEADER: the call returns %d, its answer is %#llx\n", step,
-		    result, answer);
+		tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB HEADER: the call returns %d, its answer is %#llx "
+		    "(phys %#llx)\n", step, result, answer, kvtophys(page));
 		goto fail;
 	}
 	result = scm("where the audio DSP's DTB will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP_DTB,
 	    ADSP_DTB_MEMORY, dtb_image.size, &answer);
 	if (result != 0 || answer != 0) {
-		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB'S PLACE: the call returns %d, its answer is %#llx\n", step,
+		tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB'S PLACE: the call returns %d, its answer is %#llx\n", step,
 		    result, answer);
 		goto fail;
 	}
 	memory = (uint8_t *)ml_io_map_unmappable(ADSP_DTB_MEMORY, ADSP_DTB_MEMORY_SIZE, VM_WIMG_WCOMB);
 	if (memory == NULL) {
-		printf("adsp: %u: no mapping for the DTB's memory at %#x\n", step, ADSP_DTB_MEMORY);
+		tell("adsp: %u: no mapping for the DTB's memory at %#x\n", step, ADSP_DTB_MEMORY);
 		goto fail;
 	}
 	memset(memory, 0, dtb_image.size);
@@ -1599,7 +1620,7 @@ dtb_load(void)
 	result = scm("to authenticate the audio DSP's DTB and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE,
 	    PAS_ADSP_DTB, 0, 0, &answer);
 	if (result != 0 || answer != 0) {
-		printf("adsp: %u: TRUSTZONE DOES NOT START THE DTB: the call returns %d, its answer is %#llx\n", step, result,
+		tell("adsp: %u: TRUSTZONE DOES NOT START THE DTB: the call returns %d, its answer is %#llx\n", step, result,
 		    answer);
 		goto fail;
 	}
@@ -1688,18 +1709,14 @@ step_header(void)
 	}
 
 	announce("hand the image's header to TrustZone to check its signature (image 1), in a page of ours");
-	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-		printf("adsp: %u: no memory\n", step);
+	if (!alloc_tz_header_page(&page, image.header, image.header_size)) {
+		tell("adsp: %u: no memory\n", step);
 		return false;
 	}
-	memcpy((void *)page, image.header, image.header_size);
-	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
-	}
-	settle();
 	result = scm("to take the audio DSP's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_ADSP, kvtophys(page), 0, &answer);
 	if (result != 0 || answer != 0) {
-		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx\n", step, result, answer);
+		tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx "
+		    "(phys %#llx)\n", step, result, answer, kvtophys(page));
 		return false;
 	}
 	printf("adsp: %u: TRUSTZONE ACCEPTS THE AUDIO DSP'S SIGNATURE FROM THIS KERNEL\n", step);
@@ -1707,7 +1724,7 @@ step_header(void)
 	announce("tell TrustZone where the image will be");
 	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, ADSP_MEMORY, image.size, &answer);
 	if (result != 0 || answer != 0) {
-		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
+		tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
 	}
 	printf("adsp: %u: TrustZone takes the place: %#x bytes at %#x\n", step, image.size, ADSP_MEMORY);
@@ -1952,7 +1969,7 @@ step_start(void)
 	doorbell.since = started = now_us();
 	image_written = false;
 	if (result != 0 || answer != 0) {
-		printf("adsp: %u: TRUSTZONE DOES NOT START THE AUDIO DSP: the call returns %d, its answer is %#llx\n", step, result,
+		tell("adsp: %u: TRUSTZONE DOES NOT START THE AUDIO DSP: the call returns %d, its answer is %#llx\n", step, result,
 		    answer);
 		mailbox_send("{class: image, res: load_state, name: adsp, val: off}");
 		rails(0);

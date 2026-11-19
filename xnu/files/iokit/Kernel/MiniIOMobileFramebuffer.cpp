@@ -608,6 +608,15 @@ IOMobileFramebuffer::start(IOService * provider)
 	fRowBytes = vinfo.v_rowbytes;
 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
+	if (gFBSubtype != 0) {
+		IORegistryEntry * product = IORegistryEntry::fromPath("/product", gIODTPlane);
+		uint32_t subtype = gFBSubtype;
+
+		if (product != NULL) {
+			product->setProperty("artwork-device-subtype", &subtype, sizeof(subtype));
+			product->release();
+		}
+	}
 	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
 		static const char * const places[][2] = { { "/chosen", "display-scale" }, { "/product", "artwork-scale-factor" } };
 		uint32_t scale = gFBScale;
@@ -615,14 +624,6 @@ IOMobileFramebuffer::start(IOService * provider)
 		if (gFBSubtype == 0) {
 			fWidth = kFBPointsWide * scale;
 			fHeight = kFBPointsHigh * scale;
-		} else {
-			IORegistryEntry * product = IORegistryEntry::fromPath("/product", gIODTPlane);
-			uint32_t subtype = gFBSubtype;
-
-			if (product != NULL) {
-				product->setProperty("artwork-device-subtype", &subtype, sizeof(subtype));
-				product->release();
-			}
 		}
 		/* what the loader's device tree says about the scale is where MobileGestalt has it from */
 		for (unsigned i = 0; i < sizeof(places) / sizeof(places[0]); i++) {

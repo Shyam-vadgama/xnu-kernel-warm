@@ -778,6 +778,7 @@ lx_start(void)
 		lx_tell("lx: the driver does not get as far as its exchange with the firmware: %d\n", ret);
 		return (-ret);
 	}
+	ab->hw_params.credit_flow = false;
 	ab->qmi.ce_cfg.tgt_ce_len = ab->hw_params.target_ce_count;
 	ab->qmi.ce_cfg.tgt_ce = ab->hw_params.target_ce_config;
 	ab->qmi.ce_cfg.svc_to_ce_map_len = ab->hw_params.svc_to_ce_map_len;

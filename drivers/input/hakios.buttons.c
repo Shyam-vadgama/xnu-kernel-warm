@@ -301,7 +301,7 @@ spmi_write_gpio6_config(uint8_t reg, uint8_t value)
 	uint8_t back = 0xff;
 	const char *problem = NULL;
 
-	if (!board_is_peridot() || pin.id != 0x18e || !pin.found || arb_channels == 0 ||
+	if (!board_is_peridot() || pin.id != 0x18d || !pin.found || arb_channels == 0 ||
 	    (reg != GPIO_REG_SUPPLY && reg != GPIO_REG_PULL) ||
 	    (reg == GPIO_REG_SUPPLY && value != 1) || (reg == GPIO_REG_PULL && value != 0)) {
 		return "outside the GPIO6 VIN1/pull-up allowlist";
@@ -533,7 +533,7 @@ pin_input(void)
 		    "which this driver does not do: volume up is left alone\n");
 		return;
 	}
-	volume_up.active_high = board_is_peridot() ? true : (pull == 4);
+	volume_up.active_high = (pull == 4);
 	volume_up.usable = true;
 	volume_up.last = volume_up.active_high ? !!(status & GPIO_LEVEL) : !(status & GPIO_LEVEL);
 	printf("buttons: volume up's pin keeps itself %s, so the key reads %s: watching it\n",
@@ -565,7 +565,7 @@ buttons_thread(void *parameter, __unused wait_result_t result)
 		arb_observer_stride = 0x20;
 		pon.name = "the PMK8550's power-on block";
 		pin.name = "GPIO6 of the PMXR2230";
-		pin.id = 0x18e;
+		pin.id = 0x18d;
 		arb_channels = ml_io_map(ARB_CHANNELS_PHYS, ARB_CHANNELS_SIZE);
 	}
 	printf("buttons: board %s: step 1: map the PMIC arbiter (%#lx, %#lx, %#lx) and read its version\n",

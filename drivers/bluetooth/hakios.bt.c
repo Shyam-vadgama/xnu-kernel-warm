@@ -37,6 +37,7 @@
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+extern lck_mtx_t hakios_rsc_lock;
 extern void hakios_tl(const char *format, ...) __printflike(1, 2);
 
 #define HAKIOS_SOC_BASE         0x00400000ul
@@ -142,16 +143,21 @@ static void
 bt_pins_uart(void)
 {
 	gpio_configure(40, 1, PULL_NONE, 2, false);     /* CTS */
+	printf("bt: pin 40 ok\n"); bt_sleep_ms(20);
 	gpio_configure(41, 1, PULL_DOWN, 2, false);     /* RTS */
+	printf("bt: pin 41 ok\n"); bt_sleep_ms(20);
 	gpio_configure(42, 1, PULL_UP, 2, false);       /* TX */
+	printf("bt: pin 42 ok\n"); bt_sleep_ms(20);
 	gpio_configure(43, 1, PULL_NONE, 2, false);     /* RX */
+	printf("bt: pin 43 ok\n"); bt_sleep_ms(20);
 }
 
 /* ---- RPMh --------------------------------------------------------------------------------------- */
 
 #define CMD_DB_SIZE             0x20000ul
 #define RSC_SIZE                0x10000ul
-#define TCS_ID                  0
+static uint32_t bt_tcs_id;
+#define TCS_ID                  bt_tcs_id
 #define TCS(reg)                (rsc + 0xd00 + 672 * TCS_ID + (reg))
 #define TCS_COMMON(reg)         (rsc + 0xd00 + (reg))
 #define TCS_IRQ_ENABLE          0x00
@@ -240,10 +246,21 @@ rpmh_wait(uint32_t reg, uint32_t mask, uint32_t value, const char *what)
 static bool
 rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 {
-	uint32_t irq_enable = bt_read_addr(TCS_COMMON(TCS_IRQ_ENABLE));
+	uint32_t irq_enable;
 	uint32_t irq_bit = 1u << TCS_ID;
 	bool done;
 
+	lck_mtx_lock(&hakios_rsc_lock);
+	for (int i = 0; bt_read_addr(TCS(TCS_STATUS)) == 0; i++) {
+		if (i > 2000) {
+			hakios_tl("bt: RPMh TCS %u busy (status %#x, ctrl %#x)\n", TCS_ID,
+			    bt_read_addr(TCS(TCS_STATUS)), bt_read_addr(TCS(TCS_CONTROL)));
+			lck_mtx_unlock(&hakios_rsc_lock);
+			return false;
+		}
+		bt_sleep_us(100);
+	}
+	irq_enable = bt_read_addr(TCS_COMMON(TCS_IRQ_ENABLE));
 	bt_write_addr(TCS(TCS_CMD_ENABLE), 0);
 	bt_write_addr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
 	bt_write_addr(TCS(TCS_CONTROL), bt_read_addr(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
@@ -258,15 +275,22 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	bt_write_addr(TCS(TCS_CMD_ENABLE), (1u << count) - 1);
 	bt_write_addr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable | irq_bit);
 	bt_write_addr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
+	printf("bt: tcs %u trigger (%#x=%#x, %#x=%#x, %#x=%#x)\n", TCS_ID,
+	    address[0], data[0], count > 1 ? address[1] : 0, count > 1 ? data[1] : 0,
+	    count > 2 ? address[2] : 0, count > 2 ? data[2] : 0);
+	bt_sleep_ms(20);
 	bt_write_addr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
 
 	done = rpmh_wait(TCS_IRQ_STATUS, irq_bit, irq_bit, "the request");
+	printf("bt: tcs %u done=%d irq_st=%#x st=%#x\n", TCS_ID, done,
+	    bt_read_addr(TCS_COMMON(TCS_IRQ_STATUS)), bt_read_addr(TCS(TCS_STATUS)));
 	bt_write_addr(TCS(TCS_CONTROL), bt_read_addr(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
 	bt_write_addr(TCS(TCS_CONTROL), bt_read_addr(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
 	bt_write_addr(TCS(TCS_CMD_ENABLE), 0);
 	bt_write_addr(TCS(TCS_WAIT_FOR_COMPLETION), 0);
 	bt_write_addr(TCS_COMMON(TCS_IRQ_CLEAR), irq_bit);
 	bt_write_addr(TCS_COMMON(TCS_IRQ_ENABLE), irq_enable);
+	lck_mtx_unlock(&hakios_rsc_lock);
 	return done;
 }
 
@@ -275,6 +299,19 @@ rpmh_maps(void)
 {
 	if (rsc == 0) {
 		rsc = ml_io_map(hakios_board_addr("rsc", 0x17a20000ul), RSC_SIZE);
+		if (rsc != 0) {
+			uint32_t id = bt_read_addr(rsc);
+			uint32_t cfg = bt_read_addr(rsc + 0x0c);
+
+			/* SM8635 (RSC v3+, peridot) places 3 WAKE TCSs at 0..2, so AMC starts at TCS 3. */
+			bt_tcs_id = ((id >> 16) & 0xff) >= 3 ? 3u : 0u;
+			printf("bt: rsc id %#x cfg %#x tcs %u (st %#x ctrl %#x irq_en %#x irq_st %#x)\n",
+			    id, cfg, bt_tcs_id, bt_read_addr(TCS(TCS_STATUS)), bt_read_addr(TCS(TCS_CONTROL)),
+			    bt_read_addr(TCS_COMMON(TCS_IRQ_ENABLE)), bt_read_addr(TCS_COMMON(TCS_IRQ_STATUS)));
+			hakios_tl("bt: rsc id %#x cfg %#x tcs %u (st %#x ctrl %#x irq_en %#x irq_st %#x)\n",
+			    id, cfg, bt_tcs_id, bt_read_addr(TCS(TCS_STATUS)), bt_read_addr(TCS(TCS_CONTROL)),
+			    bt_read_addr(TCS_COMMON(TCS_IRQ_ENABLE)), bt_read_addr(TCS_COMMON(TCS_IRQ_STATUS)));
+		}
 	}
 	if (cmd_db == 0) {
 		cmd_db = ml_io_map_wcomb(hakios_board_addr("cmd_db", 0x81c60000ul), CMD_DB_SIZE);
@@ -299,9 +336,13 @@ regulator_on(const char *name, uint32_t millivolts)
 		hakios_tl("bt: RPMh: no regulator \"%s\" (address %#x)\n", name, base);
 		return false;
 	}
+	printf("bt: rpmh %s (%u mV, base %#x)\n", name, millivolts, base);
+	hakios_tl("bt: rpmh %s (%u mV, base %#x)\n", name, millivolts, base);
 	if (!rpmh_write(address, data, 3)) {
+		printf("bt: %s FAILED\n", name);
 		return false;
 	}
+	printf("bt: %s on (%u mV)\n", name, millivolts);
 	hakios_tl("bt: %s on (%u mV)\n", name, millivolts);
 	return true;
 }
@@ -396,8 +437,11 @@ bt_uart_clock(void)
 		return false;
 	}
 
-	bt_write(gcc, GCC_QUPV3_WRAP1_CORE_2X_CBCR, vote | (1u << 18) | (1u << 19) | (1u << 24));
-	if (!wait_halt(GCC_QUPV3_WRAP1_CORE_2X_HALT, "core_2x") ||
+	bt_write(gcc, GCC_QUPV3_WRAP1_CORE_2X_CBCR,
+	    vote | (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21) | (1u << 24));
+	if (!wait_halt(0x18004, "m_ahb") ||
+	    !wait_halt(0x18008, "s_ahb") ||
+	    !wait_halt(GCC_QUPV3_WRAP1_CORE_2X_HALT, "core_2x") ||
 	    !wait_halt(GCC_QUPV3_WRAP1_CORE_HALT, "core") ||
 	    !wait_halt(GCC_QUPV3_WRAP1_S2_HALT, "s2")) {
 		return false;
@@ -459,8 +503,14 @@ bt_uart_init(void)
 {
 	unsigned rx_depth = (bt_read(uart, 0xe28) >> 16) & 0xff;
 
+	printf("bt: uart fw=%#x ifdis=%#x st=%#x hw0=%#x rxd=%u irq=%#x/%#x/%#x ser=%#x\n",
+	    bt_read(uart, 0x68), bt_read(uart, 0x64), bt_read(uart, 0x40),
+	    bt_read(uart, 0xe24), rx_depth, bt_read(uart, 0xe1c),
+	    bt_read(uart, 0x614), bt_read(uart, 0x644), bt_uart_ser_cfg);
+	bt_sleep_ms(20);
 	bt_write(uart, GENI_SER_M_CLK_CFG, bt_uart_ser_cfg);
 	bt_write(uart, GENI_SER_S_CLK_CFG, bt_uart_ser_cfg);
+	printf("bt: uart clk written\n"); bt_sleep_ms(20);
 	bt_write(uart, 0x258, 0);              /* DMA mode off */
 	bt_write(uart, 0x22c, 0);              /* no loopback */
 	bt_write(uart, 0x25c, 2);              /* TX: CTS mask */
@@ -475,12 +525,15 @@ bt_uart_init(void)
 	bt_write(uart, 0x294, 160);
 	bt_write(uart, 0x2a4, 0);
 	bt_write(uart, 0x2a8, 0);
+	printf("bt: uart frame written\n"); bt_sleep_ms(20);
 	bt_write(uart, 0x80c, 1);
 	bt_write(uart, 0x810, 0);
 	bt_write(uart, 0x814, rx_depth > 2 ? rx_depth - 2 : 1);
 	bt_write(uart, 0x618, 0xffffffff);
 	bt_write(uart, 0x648, 0xffffffff);
+	printf("bt: uart writing START_READ\n"); bt_sleep_ms(20);
 	bt_write(uart, 0x630, (1u << 27) | 0x80);      /* START_READ, RFR_OPEN */
+	printf("bt: uart START_READ ok\n"); bt_sleep_ms(20);
 }
 
 /* ---- H4 transport ------------------------------------------------------------------------------- */
@@ -1332,6 +1385,10 @@ bt_save_board(void)
 	bt_saved_gcc_cfg = bt_read(gcc, GCC_QUPV3_WRAP1_QSPI_REF_CFG);
 	bt_saved_gcc_cmd = bt_read(gcc, GCC_QUPV3_WRAP1_QSPI_REF_CMD);
 	bt_saved = true;
+	printf("bt: pins 40=%#x 41=%#x 42=%#x 43=%#x 156=%#x 80=%#x gcc=%#x\n",
+	    bt_saved_pins[0], bt_saved_pins[1], bt_saved_pins[2],
+	    bt_saved_pins[3], bt_saved_pins[4], bt_saved_pins[5], bt_saved_gcc_vote);
+	bt_sleep_ms(20);
 }
 
 /* Only after bt_uart_clock(): an unclocked GENI read can stall the interconnect. */
@@ -1366,7 +1423,11 @@ bt_restore(void)
 	for (unsigned i = 0; i < 10000 && (bt_read(gcc, GCC_QUPV3_WRAP1_QSPI_REF_CMD) & 1u); i++) {
 		bt_sleep_us(1);
 	}
-	bt_write(gcc, GCC_QUPV3_WRAP1_S2_CBCR, bt_saved_gcc_vote);
+	{
+		uint32_t mask = (1u << 18) | (1u << 19) | (1u << 20) | (1u << 21) | (1u << 24);
+		uint32_t cur = bt_read(gcc, GCC_QUPV3_WRAP1_S2_CBCR);
+		bt_write(gcc, GCC_QUPV3_WRAP1_S2_CBCR, (cur & ~mask) | (bt_saved_gcc_vote & mask));
+	}
 	bt_saved = false;
 	bt_uart_saved = false;
 }
@@ -1378,8 +1439,12 @@ bt_power_on(void)
 		return EIO;
 	}
 	/* BT_EN low while the supplies settle; the stock driver holds it for ~50 ms. */
+	printf("bt: driving bt_reset_pin %u low\n", bt_reset_pin);
+	bt_sleep_ms(20);
 	gpio_output(bt_reset_pin, false, PULL_DOWN, 2);
 	bt_sleep_ms(50);
+	printf("bt: reset low, wlan reset %u, sw ctrl %u\n", gpio_get(wlan_reset_pin),
+	    gpio_get(bt_sw_pin));
 	hakios_tl("bt: reset low, wlan reset %u, sw ctrl %u\n", gpio_get(wlan_reset_pin),
 	    gpio_get(bt_sw_pin));
 	if (gpio_get(wlan_reset_pin)) {
@@ -1390,6 +1455,7 @@ bt_power_on(void)
 	}
 	bt_sleep_ms(50);
 	gpio_configure(bt_sw_pin, 0, PULL_NONE, 2, false);
+	printf("bt: reset high, sw ctrl %u\n", gpio_get(bt_sw_pin));
 	hakios_tl("bt: reset high, sw ctrl %u\n", gpio_get(bt_sw_pin));
 	return 0;
 }
@@ -1451,20 +1517,34 @@ hakios_bt_init(void)
 		    (unsigned long)gcc, (unsigned long)tlmm);
 		return;
 	}
+	printf("bt: UART %#lx, GCC %#lx, TLMM %#lx; reset %u, sw %u, wlan %u\n",
+	    (unsigned long)uart_phys, (unsigned long)gcc_phys, (unsigned long)tlmm_phys,
+	    bt_reset_pin, bt_sw_pin, wlan_reset_pin);
 	hakios_tl("bt: UART %#lx, GCC %#lx, TLMM %#lx; reset %u, sw %u, wlan %u\n",
 	    (unsigned long)uart_phys, (unsigned long)gcc_phys, (unsigned long)tlmm_phys,
 	    bt_reset_pin, bt_sw_pin, wlan_reset_pin);
+	bt_sleep_ms(20);
 	bt_save_board();
+	printf("bt: save_board done, starting uart_clock\n");
+	bt_sleep_ms(20);
 	if (!bt_uart_clock()) {
+		printf("bt: uart_clock failed\n");
 		bt_restore();
 		return;
 	}
+	printf("bt: uart_clock ok, saving+quiescing uart\n");
+	bt_sleep_ms(20);
 	bt_save_uart();
 	bt_uart_quiesce();
+	printf("bt: calling bt_power_on\n");
+	bt_sleep_ms(20);
 	if (bt_power_on()) {
+		printf("bt: bt_power_on failed\n");
 		bt_restore();
 		return;
 	}
+	printf("bt: bt_power_on ok, pins+uart_init\n");
+	bt_sleep_ms(20);
 	bt_pins_uart();
 	bt_uart_init();
 	bt_rx_head = bt_rx_tail = 0;
@@ -1472,6 +1552,7 @@ hakios_bt_init(void)
 	bt_ibs_ack_pending = false;
 	bt_ibs_wakes = bt_ibs_sleeps = 0;
 	memset(&bt_rx_packet, 0, sizeof(bt_rx_packet));
+	printf("bt: step 1 done: UART clock, rails and pins\n");
 	hakios_tl("bt: step 1 done: UART clock, rails and pins\n");
 	if (step == 1) {
 		bt_restore();
@@ -1480,10 +1561,12 @@ hakios_bt_init(void)
 	int error = bt_cold_version();
 
 	if (error) {
+		printf("bt: cold HCI failed errno=%d\n", error);
 		hakios_tl("bt: cold HCI failed errno=%d\n", error);
 		bt_restore();
 		return;
 	}
+	printf("bt: step 2 done: ROM HCI answered\n");
 	hakios_tl("bt: step 2 done: ROM HCI answered\n");
 	if (step == 2) {
 		bt_restore();
@@ -1491,10 +1574,12 @@ hakios_bt_init(void)
 	}
 	error = bt_qca_firmware();
 	if (error) {
+		printf("bt: firmware failed errno=%d\n", error);
 		hakios_tl("bt: firmware failed errno=%d\n", error);
 		bt_restore();
 		return;
 	}
+	printf("bt: step 3 done: WCN6750 firmware running\n");
 	hakios_tl("bt: step 3 done: WCN6750 firmware running\n");
 	if (step == 3) {
 		bt_restore();
@@ -1502,9 +1587,11 @@ hakios_bt_init(void)
 	}
 	error = bt_control_start();
 	if (error) {
+		printf("bt: host endpoint failed errno=%d\n", error);
 		hakios_tl("bt: host endpoint failed errno=%d\n", error);
 		bt_restore();
 		return;
 	}
+	printf("bt: step 4 done: Bluetooth is up\n");
 	hakios_tl("bt: step 4 done: Bluetooth is up\n");
 }

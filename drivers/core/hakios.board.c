@@ -86,6 +86,7 @@ peridot_number_default(const char *name, uint32_t *out)
 		{ "wlan_reset",  35U },
 		{ "bt_sw",       80U },
 		{ "bt_reset",    156U },
+		{ "pas_wpss",    6U },
 	};
 
 	for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
@@ -176,7 +177,7 @@ hakios_board_report(void)
 {
 	static const char *const names[] = { "epss", "cmd_db", "rsc", "tsens0", "tsens1", "tsens2", "smem", "aoss", "ipcc",
 		                             "tlmm", "wpss_mem", "wifi_iova", "wifi_msi", "gcc", "dispcc", "intf", "ufshc", "spmi_core",
-		                             "spmi_cnfg", "spmi_obsrvr", "bt_uart" };
+		                             "spmi_cnfg", "spmi_obsrvr", "bt_uart", "pas_wpss" };
 	char bdf[20];
 	const char *dflt_bdf = board_is_peridot() ? "n16t" : "m20gl";
 	int given = 0;

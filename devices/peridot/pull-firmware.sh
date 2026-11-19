@@ -11,4 +11,5 @@ for f in bd_n16t.elf bdwlan.elf regdb_xiaomi.bin regdb.bin Data.msc wpss.mdt; do
     adb pull "/vendor/firmware_mnt/image/$f" "fw-wifi/$f" 2>/dev/null || true
 done
 adb pull /vendor/firmware_mnt/image/adsp.mdt fw-audio/ 2>/dev/null || true
+adb pull /odm/firmware/aw882xx_acf.bin fw-audio/ 2>/dev/null || adb pull /vendor/etc/aw882xx_acf.bin fw-audio/ 2>/dev/null || true
 echo "pull-firmware.sh: done (check ls fw-gpu fw-wifi fw-audio fw-bt)"
