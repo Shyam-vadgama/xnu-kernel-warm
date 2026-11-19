@@ -1048,7 +1048,7 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 		kfree(request);
 		return (EINVAL);
 	}
-	if (!quiet) {				/* (a name of no length asks for every network) */
+	if (!quiet && name_length != 0) {				/* (a name asks for that network; without one, passive listening avoids firmware stall) */
 		bzero(&asked, sizeof(asked));
 		memcpy(asked.ssid, name, name_length);
 		asked.ssid_len = (uint8_t)name_length;
@@ -1980,11 +1980,12 @@ boundary_scan(const struct hakios_sta_scan *what)
 		return (error);
 	}
 	began = lx_os_nanoseconds();
-	error = station_scan(radio, what->ssid, what->ssid_length <= sizeof(what->ssid) ? what->ssid_length : 0, what->passive, what);
+	bool quiet = what->passive || (what->ssid_length == 0);
+	error = station_scan(radio, what->ssid, what->ssid_length <= sizeof(what->ssid) ? what->ssid_length : 0, quiet, what);
 	if (said < 24) {			/* (the first few are told: whoever asks goes on asking as long as the system runs) */
 		said++;
 		lx_tell("lx: a scan for the kernel: %u channels named (0: all), %s, %u ms on each (0: the radio's own): %d; %u access "
-		    "points heard, %u frames, in %llu ms\n", what->frequency_count, what->passive ? "listening" : "asking",
+		    "points heard, %u frames, in %llu ms\n", what->frequency_count, quiet ? "listening" : "asking",
 		    what->dwell_ms, error, radio->heard_count, radio->frames, (lx_os_nanoseconds() - began) / 1000000ull);
 	}
 	return (error);

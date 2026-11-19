@@ -1905,8 +1905,10 @@ step_header(void)
 	if (result != 0 || answer != 0) {
 		printf("wifi: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx (phys %#llx), trying shutdown & retry\n",
 		    step, result, answer, (uint64_t)kvtophys(page));
-		scm("to shut the Wi-Fi DSP down before retry", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_WPSS, 0, 0, &answer);
+		mailbox_send("{class: image, res: load_state, name: wpss, val: off}");
 		sleep_ms(10);
+		scm("to shut the Wi-Fi DSP down before retry", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_WPSS, 0, 0, &answer);
+		sleep_ms(20);
 		result = scm("to take the Wi-Fi DSP's header (retry)", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_WPSS, kvtophys(page), 0, &answer);
 		if (result != 0 || answer != 0) {
 			printf("wifi: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the retry returns %d, its answer is %#llx\n", step, result, answer);
