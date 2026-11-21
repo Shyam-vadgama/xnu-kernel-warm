@@ -2106,7 +2106,7 @@ out:
 static bool
 step_our_item(void)
 {
-	static const char *const names[] = { OUR_ENTRY_STOP, OUR_ENTRY_RADIO };
+	static const char *const names[] = { OUR_ENTRY_STOP, OUR_ENTRY_RADIO, "wlan_soc_wake", "wlan_ep_power_save" };
 	struct smem_partition header;
 	struct smp2p ours;
 	uint32_t cacheline = 0, size = 0, partition;
@@ -2157,6 +2157,7 @@ step_our_item(void)
 		}
 	}
 	smem_poke(our_item + SMP2P_AT_COUNTS, 16 | (uint32_t)(sizeof(names) / sizeof(names[0])) << 16);
+	smem_poke(our_item + SMP2P_AT_VALUE(2), 1);
 	smem_poke(our_item + SMP2P_AT_VERSION, SMP2P_RESTART_ACKS << 8);
 	settle();
 	smem_poke(our_item + SMP2P_AT_VERSION, SMP2P_RESTART_ACKS << 8 | SMP2P_VERSION);

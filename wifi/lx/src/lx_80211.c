@@ -1042,9 +1042,9 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 
 	static unsigned long long s_last_scan_end = 0;
 	unsigned long long now_wait = lx_os_nanoseconds();
-	if (s_last_scan_end != 0 && (now_wait - s_last_scan_end) < 2000000000ull) {
-		unsigned ms = (unsigned)((2000000000ull - (now_wait - s_last_scan_end)) / 1000000ull);
-		if (ms > 0 && ms <= 2000) {
+	if (s_last_scan_end != 0 && (now_wait - s_last_scan_end) < 3500000000ull) {
+		unsigned ms = (unsigned)((3500000000ull - (now_wait - s_last_scan_end)) / 1000000ull);
+		if (ms > 0 && ms <= 3500) {
 			lx_pause_ms(ms);
 		}
 	}

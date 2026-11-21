@@ -80,6 +80,21 @@ The Wi-Fi stack on `peridot` runs Qualcomm's `ath11k` driver inside the XNU kern
 - TrustZone PAS ID for WPSS is **`6`** (do NOT use `ssctl_id = 0x19`).
 - Metadata header pages allocated at or above `0x970000000` are rejected by TrustZone with `(2/3, 0x1)`. Constrain metadata allocation below `0x960000000` / `0x970000000`.
 
+### 6. RX DMA Ring Replenishment & DMA Leak Recovery (`whalRecvDmaLeakRecovery:1747`)
+- **Symptoms:** Scan #1 completes normally (detecting nearby SSIDs), but Scan #2 or bursts of management frames crash the DSP firmware:
+  ```text
+  cmnos_assert.c:400: Asserted in whal_recv_recovery.c:whalRecvDmaLeakRecovery:1747
+  ```
+- **Root Cause:**
+  - WCN6750 RXDMA consumes buffers from `rx_refill_buf_ring` during channel scanning (beacons and probe responses).
+  - Since the station is not yet associated, REO does not reap data packets, and `ath11k_dp_process_rx()` is never invoked to replenish buffers.
+  - Furthermore, `ath11k_hw_ring_mask_wcn6750` had `.host2rxdma` unset, leaving the ring un-replenished across consecutive scans until it completely dried up.
+  - Rapid back-to-back scans from iOS `wifid` without inter-scan cooldown overwhelm the receive ring descriptors.
+- **Rules & Fixes:**
+  - In `wifi/lx/src/lx_bus.c`: `bus_looks` continuously monitors `rx_refill_buf_ring` and proactively replenishes whenever `num_free > 16`, reducing the IRQ poll sleep from 100 ms to 10 ms.
+  - In `wifi/lx/src/lx_80211.c`: Enforce a 3500 ms scan cooldown (`s_last_scan_end`) to pace `wifid` scans.
+  - In `drivers/wifi/hakios.wifi.c`: Match `peridot.dtb` SMP2P outputs by declaring `wlan_soc_wake` and `wlan_ep_power_save`, driving `wlan_soc_wake = 1` so the SoC hardware doesn't throttle or sleep WPSS during scans.
+
 ---
 
 ## 4. Build & Verification Commands

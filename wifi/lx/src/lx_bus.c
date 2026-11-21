@@ -34,6 +34,8 @@
 
 #include "core.h"
 #include "ce.h"
+#include "dp.h"
+#include "dp_rx.h"
 #include "debug.h"
 #include "hal.h"
 #include "hif.h"
@@ -331,11 +333,23 @@ bus_looks(void *argument)
 			more |= done >= DATA_BUDGET;
 			bus.late += bus.irq && done > 0;
 		}
+		for (unsigned i = 0; bus.data && i < ab->num_radios; i++) {
+			struct ath11k *ar = ab->pdevs[i].ar;
+			if (ar) {
+				struct dp_rxdma_ring *rx_ring = &ar->dp.rx_refill_buf_ring;
+				struct hal_srng *srng = &ab->hal.srng_list[rx_ring->refill_buf_ring.ring_id];
+				int num_free = ath11k_hal_srng_src_num_free(ab, srng, true);
+				if (num_free > 16) {
+					ath11k_dp_rxbufs_replenish(ab, i, rx_ring, num_free,
+								   ab->hw_params.hal_params->rx_buf_rbm);
+				}
+			}
+		}
 		if (bus.irq) {
 			mutex_unlock(&bus.service);
 		}
 		if (!more) {
-			lx_pause_ms(bus.irq ? 100 : 1);
+			lx_pause_ms(bus.irq ? 10 : 1);
 		}
 	}
 	bus.looks = false;
