@@ -1467,10 +1467,13 @@ alloc_tz_header_page(vm_offset_t *page_out, const uint8_t *header, uint64_t head
 
 	/*
 	 * TrustZone's PAS_INIT_IMAGE (0x42000201) rejects metadata pages allocated at or
-	 * above 0x970000000 on Peridot with (2, 0x1), so constrain the header page below
-	 * that boundary first and fall back to unconstrained kmem_alloc if none are free.
+	 * above 0x960000000 on Peridot with (2/3, 0x1), so constrain the header page below
+	 * that boundary first and fall back to 0x970000000 and unconstrained kmem_alloc if none are free.
 	 */
 	if (kmem_alloc_contig(kernel_map, &page, PAGE_SIZE, PAGE_MASK,
+	    (ppnum_t)(0x960000000ULL >> PAGE_SHIFT), 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS &&
+	    kmem_alloc_contig(kernel_map, &page, PAGE_SIZE, PAGE_MASK,
 	    (ppnum_t)(0x970000000ULL >> PAGE_SHIFT), 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS &&
 	    kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
@@ -1597,8 +1600,15 @@ dtb_load(void)
 	    kvtophys(page), 0, &answer);
 	if (result != 0 || answer != 0) {
 		tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB HEADER: the call returns %d, its answer is %#llx "
-		    "(phys %#llx)\n", step, result, answer, kvtophys(page));
-		goto fail;
+		    "(phys %#llx), trying shutdown & retry\n", step, result, answer, kvtophys(page));
+		scm("to shut down the audio DSP's DTB state before retry", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_ADSP_DTB, 0, 0, &answer);
+		sleep_ms(20);
+		result = scm("to take the audio DSP's DTB header (retry)", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_ADSP_DTB,
+		    kvtophys(page), 0, &answer);
+		if (result != 0 || answer != 0) {
+			tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE DTB HEADER: the retry returns %d, its answer is %#llx\n", step, result, answer);
+			goto fail;
+		}
 	}
 	result = scm("where the audio DSP's DTB will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP_DTB,
 	    ADSP_DTB_MEMORY, dtb_image.size, &answer);
@@ -1716,8 +1726,14 @@ step_header(void)
 	result = scm("to take the audio DSP's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_ADSP, kvtophys(page), 0, &answer);
 	if (result != 0 || answer != 0) {
 		tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx "
-		    "(phys %#llx)\n", step, result, answer, kvtophys(page));
-		return false;
+		    "(phys %#llx), trying shutdown & retry\n", step, result, answer, kvtophys(page));
+		scm("to shut down the audio DSP state before retry", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_ADSP, 0, 0, &answer);
+		sleep_ms(20);
+		result = scm("to take the audio DSP's header (retry)", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_ADSP, kvtophys(page), 0, &answer);
+		if (result != 0 || answer != 0) {
+			tell("adsp: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the retry returns %d, its answer is %#llx\n", step, result, answer);
+			return false;
+		}
 	}
 	printf("adsp: %u: TRUSTZONE ACCEPTS THE AUDIO DSP'S SIGNATURE FROM THIS KERNEL\n", step);
 
@@ -3122,6 +3138,82 @@ battmgr_get(uint32_t opcode, uint32_t property, uint32_t *value)
 	return false;
 }
 
+static bool
+battmgr_set(uint32_t opcode, uint32_t property, uint32_t set)
+{
+	struct battmgr_message q = { BATTMGR_OWNER, BATTMGR_REQUEST, opcode, { 0, property, set } };
+	uint32_t before = os_atomic_load(&battmgr.answers, acquire);
+
+	if (glink_send(&glink.channel[CHANNEL_PMIC], &q, sizeof(q)) != 0) {
+		return false;
+	}
+	for (unsigned ms = 0; ms < 1000; ms++) {
+		if (os_atomic_load(&battmgr.answers, acquire) != before) {
+			if (battmgr.opcode != opcode || battmgr.property != property || battmgr.length < sizeof(struct battmgr_message)) {
+				before = battmgr.answers;
+				continue;
+			}
+			return battmgr.result == 0;
+		}
+		sleep_ms(1);
+	}
+	return false;
+}
+
+#define BATTMGR_USB_SET         0x33
+#define USB_INPUT_CURR_LIMIT    5
+#define USB_TYPE_PD             11
+#define USB_TYPE_PD_PPS         12
+#define XM_CONNECTOR_TEMP       2
+#define CHG_MAX_ICL             3000000
+#define CHG_SAFE_ICL            1500000
+#define CHG_HOT                 4200
+#define CHG_COOL                3800
+#define CHG_CONNECTOR_HOT       600
+
+static bool chg_max_enabled = false;
+
+static void
+chg_max_round(uint32_t usb, uint32_t temp, char *line, size_t size)
+{
+	static bool hot;
+	static uint32_t own;
+	uint32_t limit = 0, connector = 0, real = 0, want;
+
+	if (!chg_max_enabled) {
+		return;
+	}
+	if (!usb) {
+		own = 0;
+		snprintf(line, size, "MAX: no charger");
+		return;
+	}
+	if (!battmgr_get(BATTMGR_USB_GET, USB_INPUT_CURR_LIMIT, &limit)) {
+		snprintf(line, size, "MAX: input limit NOT READ");
+		return;
+	}
+	if (own == 0 && limit != CHG_MAX_ICL) {
+		own = limit;
+	}
+	(void)battmgr_get(BATTMGR_USB_GET, USB_REAL_TYPE, &real);
+	(void)battmgr_get(BATTMGR_XM_GET, XM_CONNECTOR_TEMP, &connector);
+	if ((int)temp >= CHG_HOT || (int)connector >= CHG_CONNECTOR_HOT) {
+		hot = true;
+	} else if ((int)temp < CHG_COOL && (int)connector < CHG_CONNECTOR_HOT - 50) {
+		hot = false;
+	}
+	want = hot ? (own ? own : CHG_SAFE_ICL) : CHG_MAX_ICL;
+	if (limit != want) {
+		bool ok = battmgr_set(BATTMGR_USB_SET, USB_INPUT_CURR_LIMIT, want);
+		tell("adsp: battmgr: fast charge: battery %d.%d C, connector %u.%u C: input limit %u -> %u uA (%s)\n",
+		    (int)temp / 100, ((int)temp / 10) % 10, connector / 10, connector % 10, limit, want, ok ? "set" : "NOT SET");
+		snprintf(line, size, "MAX: %s%u -> %u mA %s", hot ? "HOT " : "", limit / 1000, want / 1000, ok ? "set" : "NOT SET");
+		return;
+	}
+	snprintf(line, size, "MAX: %s%u mA  %d.%d C / %u.%u C", hot ? "HOT, " : "", limit / 1000,
+	    (int)temp / 100, ((int)temp / 10) % 10, connector / 10, connector % 10);
+}
+
 /* the DSP's notices asked for, as Android does once its battery manager's channel is up */
 static void
 battmgr_notify_enable(void)
@@ -3204,6 +3296,11 @@ battmgr_thread(__unused void *parameter, __unused wait_result_t result)
 		uint32_t mode = 1;
 
 		PE_parse_boot_argn("battmgr", &mode, sizeof(mode));
+		uint32_t max_arg = 0;
+		if (PE_parse_boot_argn("chg_max", &max_arg, sizeof(max_arg)) && max_arg != 0) {
+			chg_max_enabled = true;
+			tell("adsp: battmgr: chg_max=1: fast charging enabled (3 A input limit with 42 C thermal guard)\n");
+		}
 		battmgr_notify_enable();
 		/* battmgr=3: every one of Xiaomi's properties once (opcode 0x50) */
 		for (uint32_t p = 0; mode == 3 && p < BATTMGR_XM_PROPS; p++) {
@@ -3266,6 +3363,10 @@ battmgr_thread(__unused void *parameter, __unused wait_result_t result)
 			b.usb_voltage_uv = (int32_t)usb_volt;
 			b.usb_current_ua = (int32_t)usb_curr;
 			hakios_battery_report(&b);
+			if (chg_max_enabled) {
+				char fast_line[64] = "";
+				chg_max_round(usb, temp, fast_line, sizeof(fast_line));
+			}
 			/* the charger's own story: at the start, whenever the cable comes or goes, and every minute */
 			{
 				static uint32_t usb_before = 0xffffffff;
