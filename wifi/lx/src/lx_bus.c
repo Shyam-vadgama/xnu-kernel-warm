@@ -73,6 +73,7 @@ static struct ath11k_msi_user msi_users[] = {
 	{ .name = "DP", .num_vectors = 18, .base_vector = 10 },
 };
 static void irq_say(void);
+static void lx_diag_check(struct ath11k_base *ab);
 
 static const struct ath11k_msi_config msi_config = {
 	.total_vectors = 28,
@@ -95,16 +96,6 @@ driver_says(const char *kind, const char *format, va_list list)
 	printf("ath11k%s: %s%s", kind, line, length != 0 && line[length - 1] == '\n' ? "" : "\n");
 }
 
-void
-ath11k_info(struct ath11k_base *ab, const char *format, ...)
-{
-	va_list list;
-
-	va_start(list, format);
-	driver_says("", format, list);
-	va_end(list);
-}
-
 /* (the driver's warnings and errors are said whatever happens to the rest) */
 static void
 driver_complains(const char *kind, const char *format, va_list list)
@@ -113,6 +104,16 @@ driver_complains(const char *kind, const char *format, va_list list)
 
 	vsnprintf(line, sizeof(line), format, list);
 	lx_tell("ath11k %s: %s%s", kind, line, line[0] != 0 && line[strlen(line) - 1] == '\n' ? "" : "\n");
+}
+
+void
+ath11k_info(struct ath11k_base *ab, const char *format, ...)
+{
+	va_list list;
+
+	va_start(list, format);
+	driver_complains("INFO", format, list);
+	va_end(list);
 }
 
 void
@@ -305,13 +306,17 @@ bus_looks(void *argument)
 	while (bus.looking) {
 		bool more = false;
 
-		if (lx_os_nanoseconds() - said > 300000000000ull) {	/* every five minutes: how the station and memory stand */
+		if (lx_os_nanoseconds() - said > 10000000000ull) {	/* every 10 seconds: how the station and memory stand */
 			said = lx_os_nanoseconds();
 			lx_station_say();
 			lx_memory_say();
 			if (bus.irq) {
 				irq_say();
 			}
+		}
+
+		if (bus.irq) {
+			lx_diag_check(ab);
 		}
 
 		if (bus.irq) {
@@ -460,17 +465,76 @@ irq_attach(struct ath11k_base *ab)
 static void
 irq_say(void)
 {
-	char line[400] = "";
+	char line[512] = "";
+	uint32_t typer = lx_os_gic_typer();
+	uint32_t fsr = lx_os_smmu_fsr();
+
+	lx_tell("lx: [DIAG-B] GICD_TYPER=0x%08x (MBIS=%d), SMMU_FSR=0x%08x\n",
+	    typer, (typer & (1u << 16)) != 0, fsr);
 
 	for (unsigned v = 0; v < msi_config.total_vectors; v++) {
-		unsigned long long count = lx_os_irq_count(v);
+		unsigned long long arrived = 0, handled = 0, gic_cnt = 0;
+		int pending = 0, active = 0;
 
-		if (count != 0) {
-			snprintf(line + strlen(line), sizeof(line) - strlen(line), " %u: %llu,", v, count);
+		if (lx_os_irq_stats(v, &arrived, &handled, &gic_cnt, &pending, &active) == 0) {
+			if (arrived != 0 || handled != 0 || gic_cnt != 0 || pending || active) {
+				snprintf(line + strlen(line), sizeof(line) - strlen(line),
+				    " v%u(spi%u): arr=%llu hdl=%llu gic=%llu%s%s;",
+				    v, 800 + v, arrived, handled, gic_cnt,
+				    pending ? " PEND" : "", active ? " ACT" : "");
+			}
 		}
 	}
-	lx_tell("lx: the radio's interrupts by vector (copy engines 0-9, the data path's groups 10-27):%s the thread found %llu "
-	    "times work no interrupt had brought\n", line[0] ? line : " NONE", bus.late);
+	lx_tell("lx: the radio's interrupts by vector:%s the thread found %llu times work no interrupt had brought\n",
+	    line[0] ? line : " NONE ACTIVE/FIRED,", bus.late);
+}
+
+static void
+lx_diag_check(struct ath11k_base *ab)
+{
+	static unsigned long long last_diag;
+	unsigned long long now = lx_os_nanoseconds();
+	if (now - last_diag < 1000000000ull)
+		return;
+	last_diag = now;
+
+	int ep2_cred = ab->htc.endpoint[2].tx_credits;
+	uint32_t fsr = lx_os_smmu_fsr();
+	uint32_t typer = lx_os_gic_typer();
+
+	struct ath11k_ce_pipe *pipe_rx = &ab->ce.ce_pipe[2];
+	struct ath11k_ce_pipe *pipe_tx = &ab->ce.ce_pipe[3];
+
+	u32 rx_tp = 0, rx_hp = 0, rx_cached_hp = 0;
+	u32 tx_hp = 0, tx_tp = 0, tx_cached_tp = 0;
+
+	if (pipe_rx->status_ring) {
+		struct hal_srng *srng = &ab->hal.srng_list[pipe_rx->status_ring->hal_ring_id];
+		rx_tp = srng->u.dst_ring.tp;
+		rx_hp = srng->u.dst_ring.hp_addr ? *srng->u.dst_ring.hp_addr : 0;
+		rx_cached_hp = srng->u.dst_ring.cached_hp;
+	}
+	if (pipe_tx->src_ring) {
+		struct hal_srng *srng = &ab->hal.srng_list[pipe_tx->src_ring->hal_ring_id];
+		tx_hp = srng->u.src_ring.hp;
+		tx_tp = srng->u.src_ring.tp_addr ? *srng->u.src_ring.tp_addr : 0;
+		tx_cached_tp = srng->u.src_ring.cached_tp;
+	}
+
+	unsigned long long arr2 = 0, hdl2 = 0, gic2 = 0;
+	int pend2 = 0, act2 = 0;
+	unsigned long long arr3 = 0, hdl3 = 0, gic3 = 0;
+	int pend3 = 0, act3 = 0;
+
+	lx_os_irq_stats(2, &arr2, &hdl2, &gic2, &pend2, &act2);
+	lx_os_irq_stats(3, &arr3, &hdl3, &gic3, &pend3, &act3);
+
+	lx_tell("lx: [DIAG-C] ep2_credits=%d, SMMU_FSR=0x%08x, GICD_TYPER=0x%08x (MBIS=%d)\n",
+	    ep2_cred, fsr, typer, (typer & (1u << 16)) != 0);
+	lx_tell("lx: [DIAG-C] CE2(RX): SW_tp=%u HW_hp=%u cached_hp=%u | IRQ_v2(SPI802): arr=%llu hdl=%llu gic=%llu pend=%d act=%d\n",
+	    rx_tp, rx_hp, rx_cached_hp, arr2, hdl2, gic2, pend2, act2);
+	lx_tell("lx: [DIAG-C] CE3(TX): SW_hp=%u HW_tp=%u cached_tp=%u | IRQ_v3(SPI803): arr=%llu hdl=%llu gic=%llu pend=%d act=%d\n",
+	    tx_hp, tx_tp, tx_cached_tp, arr3, hdl3, gic3, pend3, act3);
 }
 
 static int

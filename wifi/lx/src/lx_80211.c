@@ -596,6 +596,9 @@ heard(struct lx_radio *radio, const uint8_t *frame, unsigned length, unsigned fr
 		bzero(network, sizeof(*network));
 		memcpy(network->sender, frame + 16, ETH_ALEN);
 		network->signal = -128;
+		lx_tell("lx: [HEARD-NEW] AP #%u %02x:%02x:%02x:%02x:%02x:%02x freq=%u sig=%d\n",
+		    radio->heard_count, frame[16], frame[17], frame[18], frame[19], frame[20], frame[21],
+		    frequency, signal);
 	}
 	network->times++;
 	network->last = lx_os_nanoseconds();
@@ -629,6 +632,7 @@ linuxkpi_ieee80211_scan_completed(struct ieee80211_hw *hw, struct cfg80211_scan_
 {
 	struct lx_radio *radio = radio_of(hw);
 
+	lx_tell("lx: [SCAN-DONE] scan_completed: aborted=%d, total heard=%u\n", info ? info->aborted : 0, radio->heard_count);
 	lx_os_lock();
 	radio->scan = info != NULL && info->aborted ? 3 : 2;
 	lx_os_wakeup(&radio->scan);
@@ -992,6 +996,14 @@ station_down(struct lx_radio *radio)
 {
 	struct ieee80211_hw *hw = &radio->hw;
 
+	if (radio->scan == 1 && radio->ops->cancel_hw_scan != NULL && radio->vif != NULL) {
+		lx_tell("lx: station_down: cancelling active scan before removing interface\n");
+		mutex_lock(&hw->wiphy->mtx);
+		radio->ops->cancel_hw_scan(hw, radio->vif);
+		mutex_unlock(&hw->wiphy->mtx);
+		lx_pause_ms(50);
+	}
+
 	mutex_lock(&hw->wiphy->mtx);
 	if (radio->vif != NULL) {
 		radio->ops->remove_interface(hw, radio->vif);
@@ -1021,6 +1033,21 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 	struct cfg80211_ssid asked;
 	unsigned long long began;
 	int channels = 0, ret;
+	unsigned single_chan = lx_os_option("wifi_chan");
+	unsigned max_chan = lx_os_option("wifi_max_chan");
+	bool wifi_2g_only = (lx_os_option("wifi_2g") > 0);
+	if (max_chan == 0 && wifi_2g_only) {
+		max_chan = 14;
+	}
+
+	static unsigned long long s_last_scan_end = 0;
+	unsigned long long now_wait = lx_os_nanoseconds();
+	if (s_last_scan_end != 0 && (now_wait - s_last_scan_end) < 2000000000ull) {
+		unsigned ms = (unsigned)((2000000000ull - (now_wait - s_last_scan_end)) / 1000000ull);
+		if (ms > 0 && ms <= 2000) {
+			lx_pause_ms(ms);
+		}
+	}
 
 	for (unsigned band = 0; band < NUM_NL80211_BANDS; band++) {
 		channels += hw->wiphy->bands[band] != NULL ? hw->wiphy->bands[band]->n_channels : 0;
@@ -1039,7 +1066,36 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 			for (unsigned k = 0; what != NULL && k < what->frequency_count && !wanted; k++) {
 				wanted = what->frequencies[k] == has->channels[i].center_freq;
 			}
+			if (single_chan != 0) {
+				unsigned target_freq = single_chan;
+				if (single_chan >= 1 && single_chan <= 14) {
+					target_freq = (single_chan == 14) ? 2484 : (2407 + single_chan * 5);
+				} else if (single_chan >= 36 && single_chan <= 177) {
+					target_freq = 5000 + single_chan * 5;
+				}
+				if (has->channels[i].center_freq != target_freq) {
+					wanted = false;
+				}
+			}
+			if (max_chan != 0) {
+				unsigned max_freq = max_chan <= 14 ? (max_chan == 14 ? 2484 : 2407 + max_chan * 5) : max_chan;
+				if (has->channels[i].center_freq > max_freq) {
+					wanted = false;
+				}
+			}
 			if (wanted && !(has->channels[i].flags & IEEE80211_CHAN_DISABLED)) {
+				request->req.channels[request->req.n_channels++] = &has->channels[i];
+			}
+		}
+	}
+	if (single_chan != 0 || max_chan != 0) {
+		printf("lx: scanning restricted: wifi_chan=%u wifi_max_chan=%u -> %d channel(s)\n",
+		       single_chan, max_chan, request->req.n_channels);
+	}
+	if (request->req.n_channels == 0 && max_chan != 0) {
+		struct ieee80211_supported_band *has = hw->wiphy->bands[NL80211_BAND_2GHZ];
+		for (int i = 0; has != NULL && i < has->n_channels; i++) {
+			if (!(has->channels[i].flags & IEEE80211_CHAN_DISABLED)) {
 				request->req.channels[request->req.n_channels++] = &has->channels[i];
 			}
 		}
@@ -1047,6 +1103,10 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 	if (request->req.n_channels == 0) {
 		kfree(request);
 		return (EINVAL);
+	}
+	bool force_passive = (lx_os_option("wifi_passive") > 0);
+	if (force_passive) {
+		quiet = true;
 	}
 	if (!quiet) {				/* (a name of no length asks for every network) */
 		bzero(&asked, sizeof(asked));
@@ -1059,7 +1119,20 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 		request->req.duration = what->dwell_ms;
 	}
 	radio->scan = 1;
-	radio->frames = radio->others = radio->heard_count = radio->heard_lost = 0;
+	radio->frames = radio->others = 0;
+	/* Prune heard entries older than 60s, keeping valid APs across scans */
+	lx_os_lock();
+	unsigned valid = 0;
+	unsigned long long now_ns = lx_os_nanoseconds();
+	for (unsigned i = 0; i < radio->heard_count; i++) {
+		if (now_ns - radio->heard[i].last < 60000000000ull) {
+			if (valid != i)
+				radio->heard[valid] = radio->heard[i];
+			valid++;
+		}
+	}
+	radio->heard_count = valid;
+	lx_os_unlock();
 	began = lx_os_nanoseconds();
 	mutex_lock(&hw->wiphy->mtx);
 	ret = radio->ops->hw_scan(hw, radio->vif, request);
@@ -1068,7 +1141,7 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 	    name_length != 0 ? "asking for one network by name where it may send" : "asking for any network where it may send", ret);
 	if (ret == 0) {
 		lx_os_lock();
-		while (radio->scan == 1 && lx_os_nanoseconds() - began < 40000000000ull) {
+		while (radio->scan == 1 && lx_os_nanoseconds() - began < 6000000000ull) {
 			lx_os_sleep(&radio->scan, 100 * 1000000ull);
 		}
 		lx_os_unlock();
@@ -1079,9 +1152,19 @@ station_scan(struct lx_radio *radio, const uint8_t *name, unsigned name_length, 
 			mutex_lock(&hw->wiphy->mtx);
 			radio->ops->cancel_hw_scan(hw, radio->vif);
 			mutex_unlock(&hw->wiphy->mtx);
+			lx_os_lock();
+			for (unsigned wait_abort = 0; radio->scan == 1 && wait_abort < 10; wait_abort++) {
+				lx_os_sleep(&radio->scan, 100 * 1000000ull);
+			}
+			lx_os_unlock();
 		}
+	} else {
+		lx_os_lock();
+		radio->scan = 3;
+		lx_os_unlock();
 	}
 	kfree(request);
+	s_last_scan_end = lx_os_nanoseconds();
 	return (ret != 0 ? -ret : radio->scan == 2 ? 0 : ETIMEDOUT);
 }
 
@@ -1656,8 +1739,11 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 		}
 	}
 	lx_os_unlock();
-	for (unsigned attempt = 0; attempt < 3 && !target->found; attempt++) {
-		station_scan(radio, name, name_length, false, NULL);
+	for (unsigned attempt = 0; attempt < 2 && !target->found; attempt++) {
+		if (attempt > 0) {
+			lx_pause_ms(2000);
+		}
+		station_scan(radio, name, name_length, true, NULL);
 	}
 	/* the choice is made: a beacon heard from here on does not change it (the join goes on with this one's address and elements) */
 	lx_os_lock();
@@ -1980,11 +2066,13 @@ boundary_scan(const struct hakios_sta_scan *what)
 		return (error);
 	}
 	began = lx_os_nanoseconds();
-	error = station_scan(radio, what->ssid, what->ssid_length <= sizeof(what->ssid) ? what->ssid_length : 0, what->passive, what);
+	bool force_passive = (lx_os_option("wifi_passive") > 0);
+	bool is_quiet = what->passive || force_passive;
+	error = station_scan(radio, what->ssid, what->ssid_length <= sizeof(what->ssid) ? what->ssid_length : 0, is_quiet, what);
 	if (said < 24) {			/* (the first few are told: whoever asks goes on asking as long as the system runs) */
 		said++;
 		lx_tell("lx: a scan for the kernel: %u channels named (0: all), %s, %u ms on each (0: the radio's own): %d; %u access "
-		    "points heard, %u frames, in %llu ms\n", what->frequency_count, what->passive ? "listening" : "asking",
+		    "points heard, %u frames, in %llu ms\n", what->frequency_count, is_quiet ? "listening" : "asking",
 		    what->dwell_ms, error, radio->heard_count, radio->frames, (lx_os_nanoseconds() - began) / 1000000ull);
 	}
 	return (error);

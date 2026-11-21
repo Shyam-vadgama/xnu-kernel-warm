@@ -82,6 +82,9 @@ void	 lx_os_irq_enable(unsigned vector);
 void	 lx_os_irq_disable(unsigned vector);			/* returns when its function is not running */
 void	 lx_os_irq_detach_all(void);				/* returns when no function is running */
 unsigned long long lx_os_irq_count(unsigned vector);		/* how many have arrived */
+int	 lx_os_irq_stats(unsigned vector, unsigned long long *arrived, unsigned long long *handled, unsigned long long *gic_cnt, int *pending, int *active);
+unsigned int lx_os_gic_typer(void);
+unsigned int lx_os_smmu_fsr(void);
 
 /* ---- the station: scanning and joining, for whoever asks the kernel (hakios.sta.h) ---- */
 void	 lx_os_station(const struct hakios_sta_ops *ops);	/* here it is, to be asked; NULL: no longer (returns when no call is under way) */

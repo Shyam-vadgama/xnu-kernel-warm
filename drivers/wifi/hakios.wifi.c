@@ -1880,15 +1880,23 @@ step_header(void)
 	} else {
 		printf("wifi: %u: the DSP has left nothing in the shared memory: it has not run since the phone was started, and "
 		    "there is nothing to shut down\n", step);
+		if (PE_parse_boot_argn("wifi_again", &again, sizeof(again)) && again) {
+			announce("wifi_again: ensure TrustZone has shut down any stale WPSS state from warm boot");
+			scm("to shut down stale WPSS state", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_WPSS, 0, 0, &answer);
+			sleep_ms(10);
+		}
 	}
 
 	announce("hand the image's header to TrustZone to check its signature (image 6), in a page of ours");
 	/*
 	 * TrustZone's PAS_INIT_IMAGE (0x42000201) rejects metadata pages allocated at or
-	 * above 0x970000000 on Peridot with (2/3, 0x1), so constrain the header page below
-	 * that boundary first and fall back to unconstrained kmem_alloc if none are free.
+	 * above 0x960000000 on Peridot with (2/3, 0x1), so constrain the header page below
+	 * that boundary first and fall back to 0x970000000 and unconstrained kmem_alloc if none are free.
 	 */
 	if (kmem_alloc_contig(kernel_map, &page, PAGE_SIZE, PAGE_MASK,
+	    (ppnum_t)(0x960000000ULL >> PAGE_SHIFT), 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS &&
+	    kmem_alloc_contig(kernel_map, &page, PAGE_SIZE, PAGE_MASK,
 	    (ppnum_t)(0x970000000ULL >> PAGE_SHIFT), 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
 	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS &&
 	    kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
@@ -1905,9 +1913,9 @@ step_header(void)
 	if (result != 0 || answer != 0) {
 		printf("wifi: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx (phys %#llx), trying shutdown & retry\n",
 		    step, result, answer, (uint64_t)kvtophys(page));
-		mailbox_send("{class: image, res: load_state, name: wpss, val: off}");
-		sleep_ms(10);
 		scm("to shut the Wi-Fi DSP down before retry", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_WPSS, 0, 0, &answer);
+		sleep_ms(20);
+		mailbox_send("{class: image, res: load_state, name: wpss, val: on}");
 		sleep_ms(20);
 		result = scm("to take the Wi-Fi DSP's header (retry)", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_WPSS, kvtophys(page), 0, &answer);
 		if (result != 0 || answer != 0) {
@@ -3182,6 +3190,7 @@ link_thread(__unused void *parameter, __unused wait_result_t result)
 				gave_up = true;
 				printf("wifi: link: THE WI-FI DSP SAYS IT HAS GIVEN UP (\"slave-kernel\" = %#x)\n", dsp_state(&words));
 				show_crash_reason();
+				hakios_apple80211_event(HAKIOS_STA_POWER, 0);
 			}
 		}
 		for (;;) {
@@ -3907,6 +3916,15 @@ radio_space_faults(void)
 	    rd(apps_smmu.base + SMMU_SGFSYNR1));
 }
 
+uint32_t
+hakios_wifi_smmu_fsr(void)
+{
+	if (!radio_space.on || apps_smmu_context.base == 0) {
+		return 0;
+	}
+	return rd(apps_smmu_context.base + SMMU_CB_FSR);
+}
+
 /* The radio's stream through a context with our tables. */
 static bool
 radio_space_on(void)
@@ -4083,8 +4101,9 @@ hakios_wifi_board_data_file(void)
 	char board[20];
 
 	if (!initialized) {
-		hakios_board_text("wifi_bdf", "m20gl", board, sizeof(board));
+		hakios_board_text("wifi_bdf", "n16t", board, sizeof(board));
 		snprintf(file, sizeof(file), "bd_%s.elf", board);
+		printf("wifi: board data file selected: %s (board=%s)\n", file, board);
 		initialized = true;
 	}
 	return file;
@@ -4334,7 +4353,7 @@ join_given(uint64_t began)
 	}
 	bzero(&what, sizeof(what));
 	if (!hakios_wifi_network(what.ssid, &name_length, what.passphrase, &passphrase_length)) {
-		tell("wifi: the network given in fw/network is not a name and a passphrase: nothing is joined\n");
+		tell("wifi: no network to join was given (fw-wifi/network, see the README): the radio waits to be asked\n");
 		return;
 	}
 	what.ssid_length = (uint8_t)name_length;

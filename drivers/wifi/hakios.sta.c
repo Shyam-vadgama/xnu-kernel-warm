@@ -236,7 +236,7 @@ hakios_sta_ask_power(bool on)
 	lck_mtx_lock(&sta_lock);
 	if (sta_ops == NULL) {
 		lck_mtx_unlock(&sta_lock);
-		return ENXIO;
+		return on ? ENXIO : 0;
 	}
 	sta_on = on;
 	asked_power = true;
@@ -303,7 +303,7 @@ hakios_sta_ask_leave(void)
 	lck_mtx_lock(&sta_lock);
 	if (sta_ops == NULL) {
 		lck_mtx_unlock(&sta_lock);
-		return ENXIO;
+		return 0;
 	}
 	asked_leave = true;
 	asked_join = false;

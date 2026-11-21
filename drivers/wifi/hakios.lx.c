@@ -370,6 +370,10 @@ extern void gic_v3_spi_mask(uint32_t intid);
 extern void gic_v3_spi_unmask(uint32_t intid);
 extern void gic_v3_spi_detach(uint32_t intid);
 extern uint64_t gic_v3_spi_count(uint32_t intid);
+extern bool gic_v3_spi_is_pending(uint32_t intid);
+extern bool gic_v3_spi_is_active(uint32_t intid);
+extern uint32_t gic_v3_typer(void);
+extern uint32_t hakios_wifi_smmu_fsr(void);
 
 #define LX_VECTORS      32
 
@@ -383,13 +387,19 @@ static uint32_t lx_irq_pending;                 /* the vectors that have fired a
 static uint32_t lx_irq_running;                 /* the vectors whose function the thread is in */
 static thread_t lx_irq_thread;
 static LCK_MTX_DECLARE(lx_irq_lock, &lx_lock_group);
+static volatile uint64_t lx_irq_arrived_count[LX_VECTORS];
+static volatile uint64_t lx_irq_handled_count[LX_VECTORS];
 
 /* In interrupt context: the vector masked, and the thread told. */
 static void
 lx_irq_arrived(__unused void *context, uint32_t intid)
 {
+	uint32_t v = intid - lx_irq_first;
+	if (v < LX_VECTORS) {
+		os_atomic_inc(&lx_irq_arrived_count[v], relaxed);
+	}
 	gic_v3_spi_mask(intid);
-	os_atomic_or(&lx_irq_pending, 1u << (intid - lx_irq_first), relaxed);
+	os_atomic_or(&lx_irq_pending, 1u << v, relaxed);
 	thread_wakeup((event_t)&lx_irq_pending);
 }
 
@@ -418,6 +428,7 @@ lx_irq_runs(__unused void *parameter, __unused wait_result_t result)
 			}
 			lx_irq_running |= 1u << v;
 			lck_mtx_unlock(&lx_irq_lock);
+			os_atomic_inc(&lx_irq_handled_count[v], relaxed);
 			lx_vector[v].function(lx_vector[v].argument);
 			lck_mtx_lock(&lx_irq_lock);
 			lx_irq_running &= ~(1u << v);
@@ -519,6 +530,32 @@ unsigned long long
 lx_os_irq_count(unsigned vector)
 {
 	return vector < LX_VECTORS && lx_irq_first != 0 ? gic_v3_spi_count(lx_irq_first + vector) : 0;
+}
+
+int
+lx_os_irq_stats(unsigned vector, unsigned long long *arrived, unsigned long long *handled, unsigned long long *gic_cnt, int *pending, int *active)
+{
+	if (vector >= LX_VECTORS || lx_irq_first == 0) {
+		return EINVAL;
+	}
+	if (arrived) *arrived = lx_irq_arrived_count[vector];
+	if (handled) *handled = lx_irq_handled_count[vector];
+	if (gic_cnt) *gic_cnt = gic_v3_spi_count(lx_irq_first + vector);
+	if (pending) *pending = gic_v3_spi_is_pending(lx_irq_first + vector) ? 1 : 0;
+	if (active) *active = gic_v3_spi_is_active(lx_irq_first + vector) ? 1 : 0;
+	return 0;
+}
+
+unsigned int
+lx_os_gic_typer(void)
+{
+	return gic_v3_typer();
+}
+
+unsigned int
+lx_os_smmu_fsr(void)
+{
+	return hakios_wifi_smmu_fsr();
 }
 
 /* ---- the station (sys/hakios.sta.h) --------------------------------------------------------------------- */

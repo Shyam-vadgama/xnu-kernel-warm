@@ -503,7 +503,7 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 		[ -f "$f" ] && install -m 0644 "$f" root/fw/
 	done
 	WIFI_BDF=${WIFI_BDF:-}
-	for f in bd_m20gl.elf ${WIFI_BDF:+bd_${WIFI_BDF}.elf} bd_n16t.elf regdb_xiaomi.bin; do
+	for f in bd_m20gl.elf ${WIFI_BDF:+bd_${WIFI_BDF}.elf} bd_n16t.elf bd_n16tgl.elf bd_n16tin.elf regdb_xiaomi.bin; do
 		if [ -f "../fw-wifi/qca6750/$f" ]; then install -m 0644 "../fw-wifi/qca6750/$f" "root/fw/$f"
 		elif [ -f "../fw-wifi/$f" ]; then install -m 0644 "../fw-wifi/$f" "root/fw/$f"; fi
 	done

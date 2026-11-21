@@ -42,13 +42,16 @@
 #if defined(GENERIC_GIC_V3_IRQ)
 
 #define GICD_CTLR               0x0000
+#define GICD_TYPER              0x0004
 #define GICD_CTLR_ENABLE_G1NS   (1u << 1)
 #define GICD_CTLR_ARE_NS        (1u << 4)
 #define GICD_CTLR_RWP           (1u << 31)
 #define GICD_IGROUPR(n)         (0x0080 + 4 * (n))
 #define GICD_ISENABLER(n)       (0x0100 + 4 * (n))
 #define GICD_ICENABLER(n)       (0x0180 + 4 * (n))
+#define GICD_ISPENDR(n)         (0x0200 + 4 * (n))
 #define GICD_ICPENDR(n)         (0x0280 + 4 * (n))
+#define GICD_ISACTIVER(n)       (0x0300 + 4 * (n))
 #define GICD_ICACTIVER(n)       (0x0380 + 4 * (n))
 #define GICD_IPRIORITYR(n)      (0x0400 + (n))
 #define GICD_ICFGR(n)           (0x0c00 + 4 * (n))
@@ -295,6 +298,30 @@ gic_v3_spi_count(uint32_t intid)
 		}
 	}
 	return 0;
+}
+
+bool
+gic_v3_spi_is_pending(uint32_t intid)
+{
+	if (gicd_base != 0 && intid >= GIC_INTID_SPI_MIN && intid < GIC_INTID_SPURIOUS_MIN) {
+		return (gic_read32(gicd_base + GICD_ISPENDR(intid / 32)) & (1u << (intid % 32))) != 0;
+	}
+	return false;
+}
+
+bool
+gic_v3_spi_is_active(uint32_t intid)
+{
+	if (gicd_base != 0 && intid >= GIC_INTID_SPI_MIN && intid < GIC_INTID_SPURIOUS_MIN) {
+		return (gic_read32(gicd_base + GICD_ISACTIVER(intid / 32)) & (1u << (intid % 32))) != 0;
+	}
+	return false;
+}
+
+uint32_t
+gic_v3_typer(void)
+{
+	return gicd_base != 0 ? gic_read32(gicd_base + GICD_TYPER) : 0;
 }
 
 static void

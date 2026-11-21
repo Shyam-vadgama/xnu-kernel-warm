@@ -47,6 +47,8 @@
 #define SIOCSA80211             0x802869c8u     /* _IOW('i', 200, struct apple80211req) */
 #define SIOCGA80211             0xc02869c9u     /* _IOWR('i', 201, struct apple80211req) */
 
+extern int hakios_wifi_tell(const char *format, ...);
+
 struct apple80211req {
 	char req_if_name[16];
 	int32_t req_type;
@@ -306,6 +308,9 @@ get(struct apple80211req *request)
 		 * short guard interval at 20 MHz. Read wrong, the framework sees no WPA2 and builds no join
 		 * for a WPA2 network ("Unable to join").
 		 */
+		if (!hakios_sta_present()) {
+			return ENXIO;
+		}
 		uint8_t bits[13] = { 0 };
 		static const uint8_t has[] = { 2, 3, 6, 9, 10, 14, 17, 19 };
 
@@ -314,10 +319,10 @@ get(struct apple80211req *request)
 		}
 		return give(request, bits, sizeof(bits));
 	}
-	case 19: {                              /* the radio's power: one radio. Until the driver is up it counts as on: it */
-		struct {                        /* is being brought up, and Darwin asks this once, early */
+	case 19: {                              /* the radio's power: one radio. Only reports on when actually powered */
+		struct {
 			uint32_t version, radios, state[4];
-		} answer = { .version = 1, .radios = 1, .state = { !hakios_sta_present() || hakios_sta_powered() } };
+		} answer = { .version = 1, .radios = 1, .state = { hakios_sta_powered() } };
 
 		return give(request, &answer, sizeof(answer));
 	}
@@ -385,6 +390,45 @@ get(struct apple80211req *request)
 		kfree_data(bss, sizeof(*bss));
 		return error;
 	}
+	case 51: {                              /* COUNTRY_CODE: essential for wifid */
+		struct {
+			uint32_t version;
+			char cc[4];
+		} answer = { .version = 1, .cc = "ID" };
+
+		return give(request, &answer, sizeof(answer));
+	}
+	case 14:                                /* PHY_MODE: 6 (802.11ax), 4 (802.11n) */
+		request->req_val = 6;
+		return 0;
+	case 17:                                /* NOISE */
+		request->req_val = -95;
+		return 0;
+	case 5:                                 /* POWERSAVE */
+		request->req_val = 0;
+		return 0;
+	case 8:                                 /* RATE: 54 Mbit/s */
+		request->req_val = 54;
+		return 0;
+	case 18:                                /* INT_MIT */
+		request->req_val = 0;
+		return 0;
+	case 57:                                /* MCS */
+		request->req_val = 7;
+		return 0;
+	case 6:                                 /* PROTMODE */
+		request->req_val = 0;
+		return 0;
+	case 106: {                             /* RSSI_BOUNDS */
+		struct {
+			int32_t min, max;
+		} bounds = { -100, -30 };
+		return give(request, &bounds, sizeof(bounds));
+	}
+	case 96:
+	case 97:
+	case 115:
+		return 0;
 	default:
 		break;
 	}
@@ -589,6 +633,13 @@ set(const struct apple80211req *request, char *said, size_t said_size)
 	}
 	case 10:
 		return set_scan(request, said, said_size);
+	case 25:                                /* HOST_AP_MODE */
+	case 51:                                /* COUNTRY_CODE */
+	case 365:
+	case 383:
+	case 419:
+		snprintf(said, said_size, " (ignored/handled type %d)", request->req_type);
+		return 0;
 	default:
 		return EOPNOTSUPP;
 	}
@@ -621,7 +672,7 @@ hakios_apple80211_event(enum hakios_sta_event event, int status)
 
 	if (said < 200) {
 		said++;
-		printf("apple80211: the station says: %s, %d\n", event == HAKIOS_STA_POWER ? "power" : event == HAKIOS_STA_SCAN_DONE ?
+		hakios_wifi_tell("apple80211: the station says: %s, %d\n", event == HAKIOS_STA_POWER ? "power" : event == HAKIOS_STA_SCAN_DONE ?
 		    "a scan is over" : event == HAKIOS_STA_JOIN_DONE ? "a join is over" : "the link", status);
 	}
 	switch (event) {
@@ -728,11 +779,18 @@ hakios_apple80211_ioctl(u_long command, void *data)
 	/* (a request that is repeated for ever is said a few hundred times) */
 	if (said < 800) {
 		said++;
-		printf("apple80211: %s %s %d (%s), value %d, %u bytes%s: %s", who, is_set ? "sets" : "gets", request->req_type,
-		    type_name(request->req_type), request->req_val, request->req_len, what, error == 0 ? "answered\n" : error ==
-		    EOPNOTSUPP ? "REFUSED\n" : "");
-		if (error != 0 && error != EOPNOTSUPP) {
-			printf("error %d\n", error);
+		if (error == 0) {
+			hakios_wifi_tell("apple80211: %s %s %d (%s), value %d, %u bytes%s: answered\n",
+			    who, is_set ? "sets" : "gets", request->req_type,
+			    type_name(request->req_type), request->req_val, request->req_len, what);
+		} else if (error == EOPNOTSUPP) {
+			hakios_wifi_tell("apple80211: %s %s %d (%s), value %d, %u bytes%s: REFUSED\n",
+			    who, is_set ? "sets" : "gets", request->req_type,
+			    type_name(request->req_type), request->req_val, request->req_len, what);
+		} else {
+			hakios_wifi_tell("apple80211: %s %s %d (%s), value %d, %u bytes%s: error %d\n",
+			    who, is_set ? "sets" : "gets", request->req_type,
+			    type_name(request->req_type), request->req_val, request->req_len, what, error);
 		}
 	}
 	return error;
