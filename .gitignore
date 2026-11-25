@@ -124,6 +124,9 @@ __pycache__/
 !/devices/qemu/
 !/devices/peridot/
 !/devices/peridot/prebuilt/SILICIUM_UEFI.fd
+!/devices/warm/
+!/devices/warm/prebuilt/SILICIUM_UEFI.fd
+/devices/warm/uefi/
 
 # Android platform-tools for xl on a Mac (tools/macos-bin/README.md): not part of the repository
 /tools/macos-bin/platform-tools
