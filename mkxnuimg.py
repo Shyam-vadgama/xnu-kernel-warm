@@ -113,15 +113,35 @@ if args.payload:
     blob += b'\0' * (-len(blob) % 16)
     print(f'payload: {len(data)} bytes, bytesum={sum(data) & 0xffffffff:08x}')
 
-dtb = open(parts['dtb'], 'rb').read()
+compression = os.environ.get('KERNEL_COMPRESSION') or CONF.get('KERNEL_COMPRESSION', 'auto')
+append_dtb = os.environ.get('APPEND_DTB') or CONF.get('APPEND_DTB', 'auto')
+
+if compression == 'auto':
+    compression = 'gzip' if header_version in ('0', '1', '2') else 'none'
+
+if append_dtb == 'auto':
+    append_dtb = '1' if header_version in ('0', '1', '2') else '0'
+
+if compression == 'gzip':
+    kdata = gzip.compress(blob, 6)
+else:
+    kdata = blob
+
+if append_dtb == '1' and os.path.isfile(parts.get('dtb', '')):
+    kdata += open(parts['dtb'], 'rb').read()
+
 kernel = args.output + '.kernel~'
-open(kernel, 'wb').write(gzip.compress(blob, 6) + dtb)
+open(kernel, 'wb').write(kdata)
 try:
     # board "HACKiOS": how the loader of an installed phone tells which A/B slot's boot partition is its own
     # (xnuloader/flashboot.c, ab_switch_back) -- an Android boot image never has that name
     cmd = [sys.executable, parts['mkbootimg'], '--kernel', kernel, '--header_version', header_version, '-o', args.output]
     if header_version in ('0', '1', '2'):
         cmd += ['--ramdisk', parts['ramdisk'], '--board', 'HACKiOS']
+    elif header_version == '4':
+        os_ver = cfg('OS_VERSION', '17.0.0')
+        os_patch = cfg('OS_PATCH_LEVEL', '2026-11')
+        cmd += ['--os_version', os_ver, '--os_patch_level', os_patch]
     subprocess.check_call(cmd)
 finally:
     os.unlink(kernel)
