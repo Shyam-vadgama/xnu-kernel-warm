@@ -556,6 +556,7 @@ struct platform {
 	uint64_t gic_dist, gic_redist;   /* GICv3 */
 	uint64_t gic_redist_size, gic_redist_stride;
 	uint64_t uart;                   /* PL011, 0 if none */
+	uint64_t ufshc;                  /* UFS host controller base */
 	int psci_hvc;                    /* the firmware's power interface is called with HVC, not SMC */
 	int log_other_cpu;               /* keep notes in the log partition while a kernel starts on another core */
 	int cores;                       /* at most this many processor cores, numbered from 0 ... */
@@ -566,7 +567,7 @@ struct platform {
 
 static const struct platform platform_qemu_virt = {
 	.name = "qemu-virt", .io_base = 0x08000000, .io_size = 0x08000000,
-	.gic_dist = 0x08000000, .gic_redist = 0x080A0000, .uart = 0x09000000, .psci_hvc = 1,
+	.gic_dist = 0x08000000, .gic_redist = 0x080A0000, .uart = 0x09000000, .ufshc = 0, .psci_hvc = 1,
 	.cores = 8, .core_shift = 0,
 	/*
 	 * QEMU's emulated cores stop each other all the time (every flush of a page from all the
@@ -579,7 +580,8 @@ static const struct platform platform_qemu_virt = {
 static const struct platform platform_redwood = {
 	/* io_base must be non-zero: XNU treats a zero SoC base as "no SoC" and skips clock setup. */
 	.name = "redwood", .io_base = 0x00400000, .io_size = 0x3FC00000,
-	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .gic_redist_size = 0x100000, .uart = 0, .log_other_cpu = 1,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .gic_redist_size = 0x100000, .uart = 0,
+	.ufshc = 0x01D84000ULL, .log_other_cpu = 1,
 	.cores = 8, .core_shift = 8,
 	/*
 	 * Cores 0-3 are Cortex-A55s (1.8 GHz at most), 4-7 Cortex-A78s (2.4 GHz): a big one is about
@@ -593,10 +595,20 @@ static const struct platform platform_peridot = {
 	/* POCO F6 / Redmi Turbo 3 (SM8635 "peridot"). */
 	.name = "peridot", .io_base = 0x00400000, .io_size = 0x3FC00000,
 	.gic_dist = 0x17100000, .gic_redist = 0x17180000, .gic_redist_size = 0x200000, .gic_redist_stride = 0x40000,
-	.uart = 0, .log_other_cpu = 1,
+	.uart = 0, .ufshc = 0x01D84000ULL, .log_other_cpu = 1,
 	.cores = 8, .core_shift = 8,
 	/* Cores 0-2 are Cortex-A520s, 3-6 Cortex-A720s, 7 a Cortex-X4. */
 	.small_cores = 0x07,
+};
+
+static const struct platform platform_warm = {
+	/* Xiaomi Redmi A4 5G (SM4635 "warm"). */
+	.name = "warm", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x0F200000, .gic_redist = 0x0F240000, .gic_redist_size = 0x100000, .gic_redist_stride = 0x20000,
+	.uart = 0, .ufshc = 0x04804000ULL, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	/* Cores 0-5 are Cortex-A55s, 6-7 Cortex-A78s. */
+	.small_cores = 0x3F,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -1693,7 +1705,7 @@ device_path_print(uint64_t unit, const efi_device_path *dp)
  * touches the storage; it reads for the kernel (block_poll) and writes the log (write_logs) only
  * while UEFI's list is the one in the controller.
  */
-#define HC_PA              0x1d84000ULL        /* ufshc@1d84000, "ufs_mem", in this phone's Android device tree */
+#define HC_PA              (PLAT->ufshc ? PLAT->ufshc : 0x01d84000ULL)
 #define HC_CAP             0x00
 #define HC_VER             0x08
 #define HC_IS              0x20
@@ -2246,7 +2258,7 @@ charger_start(void)
 	static const efi_guid qcom_charger_guid = QCOM_CHARGER_GUID;
 	efi_status ex_status, qcom_status, init_status = 0;
 
-	if (charger_enabled || (PLAT != &platform_redwood && PLAT != &platform_peridot)) {
+	if (charger_enabled || (PLAT != &platform_redwood && PLAT != &platform_peridot && PLAT != &platform_warm)) {
 		return;
 	}
 	ex_status = BS->locate_protocol(&charger_ex_guid, NULL, (void **)&CHARGER_EX);
@@ -2539,6 +2551,7 @@ exception_handler(int64_t type, uint64_t *ctx)
 	print("loader image base %x (elr offset %x)\n", (uint64_t)(uintptr_t)&__ImageBase,
 	    ctx[EXC_CTX_ELR] - (uint64_t)(uintptr_t)&__ImageBase);
 	flush_log();
+	BS->stall(15000000);
 	ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
 	for (;;) {
 	}
@@ -4360,25 +4373,34 @@ efi_main(efi_handle image, efi_system_table *st)
 			PLAT = &platform_redwood;
 		} else if (SCREEN.base == 0xE3940000ULL) {
 			PLAT = &platform_peridot;
+		} else if (SCREEN.base == 0x82D00000ULL) {
+			PLAT = &platform_warm;
 		} else {
 			ramfb_phone_screen();
 		}
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
+	BS->stall(3000000);
 
 	install_exception_hook();
 	wdt_arm();
 
 	int have_payload = parse_payload(&pi, 0);
-	if (have_payload && pi.usb_mode && usb_start()) {
+	int usb_up = (have_payload && pi.usb_mode) ? usb_start() : 0;
+	if (usb_up) {
 		flush_log();
-		usb_command_loop();
+		if (pi.kernel == NULL) {
+			usb_command_loop();
+		}
 	}
 
-	/* One-shot mode: run the kernel that came with the image, then reset. */
-	if (have_payload) {
+	/* One-shot mode: run the kernel that came with the image, then reset (or serve USB logs if USB is up). */
+	if (have_payload && pi.kernel != NULL) {
 		run_kernel(0, 0);
+		if (usb_up) {
+			usb_command_loop();
+		}
 	}
 	reboot();
 	return 0;
