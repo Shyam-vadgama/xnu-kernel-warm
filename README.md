@@ -12,7 +12,50 @@ Start with [Getting started](docs/getting-started/index.md), [On the phone](docs
 
 ---
 
-## POCO F6 / Redmi Turbo 3 (`peridot`) Port
+## Xiaomi Redmi A4 5G (`warm`) Port
+
+> **HakiOS 16.5 (Darwin 22.5.0 / XNU `xnu-8796.121.2`) bring-up for Xiaomi Redmi A4 5G (`warm`, Qualcomm Snapdragon 4s Gen 2 / SM4635 `pitti`).**  
+> **Maintainer:** [@Shyam-vadgama](https://github.com/Shyam-vadgama)  
+> **Kernel Repository:** [https://github.com/Shyam-vadgama/xnu-kernel-warm](https://github.com/Shyam-vadgama/xnu-kernel-warm) (Branch: `warm-2.3.4`)  
+> **UEFI Repository:** [https://github.com/Shyam-vadgama/Mu-Silicium-warm](https://github.com/Shyam-vadgama/Mu-Silicium-warm) (Branch: `warm`)  
+> **Base Credit:** Built directly on the `peridot` port by **[amiaxf (`@slayedkaito`)](https://github.com/slayedkaito/xnu-kernel-peridot-amiaxf)** and upstream **[HakiOS (`oosexgang/hakios-xnu-kernel`)](https://github.com/oosexgang/hakios-xnu-kernel)**.
+
+### Current Bring-up Status (`warm`)
+
+| Subsystem | Status | Notes & Evidence |
+|---|---|---|
+| **RAM Boot (`fastboot boot`)** | 🟢 **Working** | Android v4 `boot.img` + AVB testkey footer boots `BootShim` -> open-source `Mu-Silicium` UEFI (`warmPkg`) -> `xnuloader` (`loader.efi`) from RAM without flashing any partition. |
+| **Display (UEFI GOP FB)** | 🟢 **Working** | `720 × 1640` panel framebuffer at `0x82D00000` renders BootShim stage colors, UEFI console, XNU verbose boot log, and userland `/dev/console`. |
+| **XNU Kernel & Userland PID 1** | 🟢 **Working** | XNU `22.5.0` boots cleanly with `-v rd=md0 bootcpu=7 cpus=1` and executes static Mach-O [`userland/hello`](userland/src/hello.c) as PID 1 (`uid 0`, `console fd 0`, staying alive). |
+| **UFS Storage (`ufs=2`)** | 🟡 **In Progress** | Stock dump verified 6-LUN 4KB UFS (`ufshc@4804000`, `boot_a` on LUN 4). Added open-source MMIO [`WarmUfsHcDxe`](https://github.com/Shyam-vadgama/Mu-Silicium-warm) + EDK2 `UfsPassThruDxe`/`ScsiBusDxe`/`ScsiDiskDxe` + `SMMU` (`0x0C600000`) detach + `loader.c` `platform_warm.ufshc`. Flash read verification under test. |
+| **USB Fastboot Log Capture** | 🟡 **In Progress** | Added open-source polled DWC3 `WarmUsbDeviceDxe` (`0x04E00000`) with SM4635 GCC `USB30_PRIM` clock/GDSC activation so `./xl` / `fastboot get_staged` can pull live logs & screenshots to host. |
+| **Touch, GPU, Wi-Fi, Audio, Cellular** | 🔴 **Not Ported** | Hardware addresses partially cataloged in [`devices/warm/soc.args`](devices/warm/soc.args); drivers left disabled in [`devices/warm/configs/warm.config`](devices/warm/configs/warm.config). |
+
+### Hardware Sources (`warm`)
+
+All device-specific addresses and configurations come exclusively from **Xiaomi Redmi A4 5G Stock HyperOS (`OS3.0.303.0.WGVINXM`) dumps** and **Xiaomi's open-source SM4635 Linux kernel**:
+- **Stock DTB / DTBO**: DDR memory map, `ramoops@80D00000`, GICv3 (`0x0F200000` / `0x0F240000`), `apps-smmu@0xc600000` (MDP SIDs `0x420/0x421/0x43C/0x43D`, UFS SID `0x180`, USB SID `0x260`), `ufshc@4804000`, `dwc3@4e00000`, `hsphy@1613000`, framebuffer `0x82D00000`.
+- **Stock GPT & Firehose XML (`gpt_main0..5.bin`, `rawprogram0..5.xml`)**: 6 UFS LUNs with `4096`-byte physical sectors (`SECTOR_SIZE_IN_BYTES="4096"`).
+- **Xiaomi Kernel Open Source (`drivers/clk/qcom/gcc-pitti.c`)**: `GCC` (`0x01400000`) `gcc_usb30_prim_gdsc` (`0x1A010`) and `USB30_PRIM` clock branch registers (`0x1A000..0x1D008`).
+
+### Quick Build (`warm`)
+
+```bash
+# 1. Build kernel & userland probe
+make warm_defconfig
+make kernel JOBS=$(nproc)
+source xnu-env.sh && xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding -fno-stack-protector -fno-builtin \
+  -Wl,-e,_start -Wl,-pagezero_size,0x100000000 -o userland/hello userland/src/hello.c
+
+# 2. Package payload + build v4 boot image (with prebuilt or custom SILICIUM_UEFI.fd)
+python3 xnuloader/mkpayload.py -o warm-payload.bin loader.efi=xnuloader/loader.efi kernel=hakios-kernel \
+  ramdisk=userland/hello --usb --cmdline "-v rd=md0 bootcpu=7 cpus=1 ufs=2 hello_wait=60"
+DEVICE=warm python3 mkxnuimg.py -p warm-payload.bin -o warm-ios.img
+```
+
+---
+
+## POCO F6 / Redmi Turbo 3 (`peridot`) Port (Upstream Base)
 
 > **HakiOS 16.5 (Darwin 22.5.0 / iOS 16.5 on Apple XNU `xnu-8796.121.2`) for Xiaomi POCO F6 / Redmi Turbo 3 (`peridot`, Qualcomm Snapdragon 8s Gen 3 / SM8635).**  
 > **Maintained & Developed by [amiaxf (slayedkaito on GitHub)](https://github.com/slayedkaito)**  
@@ -118,7 +161,8 @@ removed.
 
 ## Team & Credits
 
-- **amiaxf ([@slayedkaito](https://github.com/slayedkaito))** — POCO F6 / Redmi Turbo 3 (`peridot`) port maintainer, driver bring-up, and Wi-Fi subsystem development.
-- **HakiOS Team:** @oodze (founder), @netusd (advertising / ceo-dev), @wannqn (dev), @hxfuxyyXD (dev), Rhaenja Hun（杭润嘉） (developer / sponsor).
-- **Mu-Silicium Team** — for open-source Qualcomm UEFI platform sources.
+- **[amiaxf (@slayedkaito)](https://github.com/slayedkaito)** — POCO F6 / Redmi Turbo 3 (`peridot`) port author ([`xnu-kernel-peridot-amiaxf`](https://github.com/slayedkaito/xnu-kernel-peridot-amiaxf)), whose XNU/UEFI bring-up, `XnuLoader` bridge, and boot pipeline made the `warm` port possible.
+- **[Shyam-vadgama](https://github.com/Shyam-vadgama)** — Xiaomi Redmi A4 5G (`warm` / SM4635) port bring-up (`xnu-kernel-warm`, `Mu-Silicium-warm`).
+- **HakiOS Team ([oosexgang/hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel)):** @oodze (founder), @netusd (advertising / ceo-dev), @wannqn (dev), @hxfuxyyXD (dev), Rhaenja Hun（杭润嘉） (developer / sponsor).
+- **[Project-Silicium/Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium)** — Open-source ARM64 EDK2 UEFI platform sources.
 - **Reference Porters:** `mariqnetr/hakios-shennong` (Xiaomi 14 Pro), `shimoku74/hakios-xnu-kernel`, Nothing Phone (1) `spacewar` port team.
