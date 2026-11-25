@@ -39,6 +39,39 @@ board_is_peridot(void)
 }
 
 static bool
+board_is_warm(void)
+{
+	static int cached = -1;
+	DTEntry entry;
+	void const *prop;
+	unsigned int size;
+
+	if (cached >= 0) {
+		return cached != 0;
+	}
+	cached = (SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "device_type", &prop, &size) == kSuccess &&
+	    size >= 4 && memcmp(prop, "warm", 4) == 0) ? 1 : 0;
+	return cached != 0;
+}
+
+static bool
+warm_addr_default(const char *name, vm_offset_t *out)
+{
+	static const struct { const char *name; vm_offset_t value; } table[] = {
+		{ "ufshc",       0x04804000UL },
+	};
+
+	for (unsigned i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+		if (strcmp(name, table[i].name) == 0) {
+			*out = table[i].value;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool
 peridot_addr_default(const char *name, vm_offset_t *out)
 {
 	static const struct { const char *name; vm_offset_t value; } table[] = {
@@ -132,6 +165,9 @@ hakios_board_addr(const char *name, vm_offset_t dflt)
 	if (board_is_peridot() && peridot_addr_default(name, &peridot_val)) {
 		return peridot_val;
 	}
+	if (board_is_warm() && warm_addr_default(name, &peridot_val)) {
+		return peridot_val;
+	}
 	return dflt;
 }
 
@@ -195,6 +231,8 @@ hakios_board_report(void)
 	if (given == 0) {
 		if (board_is_peridot()) {
 			printf("board: using POCO F6 (peridot, SM8635) defaults for omitted blocks\n");
+		} else if (board_is_warm()) {
+			printf("board: using Xiaomi Redmi A4 5G (warm, SM4635) defaults for omitted blocks\n");
 		} else {
 			printf("board: no board_ addresses given: the POCO X5 Pro's (SM7325) for every block\n");
 		}

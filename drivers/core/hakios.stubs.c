@@ -14,6 +14,7 @@
  * the configuration that would need a stand-in for it.
  */
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/errno.h>
 #include <sys/types.h>
